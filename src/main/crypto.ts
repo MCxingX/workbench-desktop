@@ -7,7 +7,12 @@ const MAGIC = Buffer.from('WBDB')
 const VERSION = 1
 const KEY_BYTES = 32
 
-function keyFilePath(): string {
+/**
+ * 密钥位置。测试（WB_DATA_DIR）时跟着隔离目录走，绝不碰用户真实密钥。
+ */
+export function keyFilePath(): string {
+  const override = process.env.WB_DATA_DIR?.trim()
+  if (override) return path.join(override, 'master.key')
   return path.join(app.getPath('appData'), 'Workbench', 'master.key')
 }
 

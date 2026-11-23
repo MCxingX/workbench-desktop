@@ -65,6 +65,13 @@ export function ensureDataDir(dir: string): void {
  * 都是空的、又要重新配"。宁可这次打不开，也不能把指针漂走。
  */
 export function resolveDataDirInfo(): DataDirResolution {
+  // 测试/冒烟专用：WB_DATA_DIR 指向临时目录时，完全不读也不写真实数据目录与引导文件
+  const override = process.env.WB_DATA_DIR?.trim()
+  if (override) {
+    ensureDataDir(override)
+    return { dir: override, warn: null }
+  }
+
   const existing = readBootstrap()
   if (existing) {
     try {

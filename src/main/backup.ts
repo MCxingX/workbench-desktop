@@ -1,7 +1,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { app } from 'electron'
-import { redact, sha256 } from './crypto'
+import { keyFilePath, redact, sha256 } from './crypto'
 import { exportBytes, persistNow, query } from './store'
 
 const MAGIC = Buffer.from('WBK1')
@@ -39,7 +39,7 @@ function collect(dataDir: string): ContainerFile[] {
   const ui = path.join(dataDir, 'ui.json')
   if (fs.existsSync(ui)) out.push({ name: 'ui.json', bytes: fs.readFileSync(ui) })
   // 主密钥不在数据目录里（在 %APPDATA%\Workbench），不一起打包的话换机后备份解不开
-  const keyFile = path.join(app.getPath('appData'), 'Workbench', 'master.key')
+  const keyFile = keyFilePath()
   if (fs.existsSync(keyFile)) out.push({ name: 'master.key', bytes: fs.readFileSync(keyFile) })
   return out
 }

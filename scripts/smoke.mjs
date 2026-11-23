@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { existsSync, rmSync } from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import electronPath from 'electron'
@@ -13,7 +14,15 @@ if (!existsSync(entry) || !existsSync(renderer)) {
   process.exit(2)
 }
 
-const childEnv = { ...process.env, WB_SMOKE: '1' }
+/**
+ * 铁律：冒烟永远只写这个隔离目录。
+ * 之前它是直接跑在用户真实数据目录（D:\WorkbenchData）上的，清理测试数据等于把用户
+ * 的班表、打卡、口径全删了 —— 这是不可接受的。WB_DATA_DIR 会同时接管密钥文件。
+ */
+const smokeDir = path.join(os.tmpdir(), 'Workbench-smoke')
+rmSync(smokeDir, { recursive: true, force: true })
+
+const childEnv = { ...process.env, WB_SMOKE: '1', WB_DATA_DIR: smokeDir }
 // 关键：本机环境存在 ELECTRON_RUN_AS_NODE=1，会把 electron 当 node 跑，必须清掉
 delete childEnv.ELECTRON_RUN_AS_NODE
 

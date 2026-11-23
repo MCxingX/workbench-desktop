@@ -79,6 +79,11 @@ export async function runSmoke(win: BrowserWindow, info: AppInfo): Promise<numbe
     fs.unlinkSync(probe)
     push('数据目录可写', writable, info.dataDir)
 
+    // ── 铁律：冒烟只写临时目录，绝不碰用户真实数据 ──
+    const smokeInfo = await evalJs<{ file: string }>(`window.wb.storeInfo()`)
+    const inTemp = smokeInfo.file.toLowerCase().includes('workbench-smoke')
+    push('冒烟跑在隔离目录（不碰真实数据）', inTemp, smokeInfo.file)
+
     // ── M1：班表引擎接入 ──
     // 8. 倒计时主数字已渲染（hh:mm:ss）
     const display = await evalJs<string>(`document.querySelector('[data-module="countdown"] .cd-display')?.textContent?.trim() || ''`)
