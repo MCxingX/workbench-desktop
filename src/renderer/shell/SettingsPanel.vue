@@ -601,28 +601,6 @@ const maskOf = (v: WeekVariant | null): boolean[] => (v ? v.mask : [])
           <div class="issue" v-for="(i, idx) in pluginIssues" :key="idx">✕ {{ i.file }}：{{ i.message }}</div>
         </template>
 
-        <!-- 关于 -->
-        <template v-else>
-          <h3>关于</h3>
-          <div class="row"><label>版本</label><span>v{{ info?.version }}</span></div>
-          <div class="row"><label>平台</label><span>{{ info?.platform }} · {{ info?.isPackaged ? '已打包' : '开发模式' }}</span></div>
-          <div class="row"><label>数据</label><code class="code">{{ info?.dataDir }}</code></div>
-          <h3>快捷键</h3>
-          <div class="keys">
-            <div><kbd>Ctrl+K</kbd> 命令面板</div>
-            <div><kbd>Ctrl+,</kbd> 打开系统设置</div>
-            <div><kbd>Ctrl+Alt+K</kbd> 全局打卡（窗口不在前台也行）</div>
-            <div><kbd>Ctrl+Alt+L</kbd> 立即锁定</div>
-            <div><kbd>F</kbd> 大屏 · <kbd>Esc</kbd> 退出 · <kbd>T</kbd> 换主题</div>
-            <div><kbd>Enter</kbd> 保存一行 · <kbd>Esc</kbd> 清空</div>
-          </div>
-          <h3>外观</h3>
-          <div class="row">
-            <label>主题</label>
-            <button class="mini" @click="toggleTheme">切换亮/暗（当前 {{ ui?.theme }}）</button>
-            <span class="hint">布局锁在网格右上角的锁图标</span>
-          </div>
-          <p class="tip">数据只在本机：库为 AES-256-GCM 密文，密钥由 Windows DPAPI 保管，进程不联网。</p>
         <template v-else-if="tab === 'update'">
           <div class="upd">
             <div class="upd-row">
@@ -670,7 +648,29 @@ const maskOf = (v: WeekVariant | null): boolean[] => (v ? v.mask : [])
           </div>
         </template>
 
-        <template v-else-if="tab === 'about'">
+        <!-- 关于 -->
+        <template v-else>
+          <h3>关于</h3>
+          <div class="row"><label>版本</label><span>v{{ info?.version }}</span></div>
+          <div class="row"><label>平台</label><span>{{ info?.platform }} · {{ info?.isPackaged ? '已打包' : '开发模式' }}</span></div>
+          <div class="row"><label>数据</label><code class="code">{{ info?.dataDir }}</code></div>
+          <h3>快捷键</h3>
+          <div class="keys">
+            <div><kbd>Ctrl+K</kbd> 命令面板</div>
+            <div><kbd>Ctrl+,</kbd> 打开系统设置</div>
+            <div><kbd>Ctrl+Alt+K</kbd> 全局打卡（窗口不在前台也行）</div>
+            <div><kbd>Ctrl+Alt+L</kbd> 立即锁定</div>
+            <div><kbd>F</kbd> 大屏 · <kbd>Esc</kbd> 退出 · <kbd>T</kbd> 换主题</div>
+            <div><kbd>Enter</kbd> 保存一行 · <kbd>Esc</kbd> 清空</div>
+          </div>
+          <h3>外观</h3>
+          <div class="row">
+            <label>主题</label>
+            <button class="mini" @click="toggleTheme">切换亮/暗（当前 {{ ui?.theme }}）</button>
+            <span class="hint">布局锁在网格右上角的锁图标</span>
+          </div>
+          <p class="tip">数据只在本机：库为 AES-256-GCM 密文，密钥由 Windows DPAPI 保管，进程不联网。</p>
+        </template>
 
         <div class="foot">
           <span class="err" v-if="err">{{ err }}</span>

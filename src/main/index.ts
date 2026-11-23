@@ -563,7 +563,7 @@ app.whenReady().then(async () => {
         /* 通知被系统关掉也无所谓 */
       }
     })
-  }, 15000)
+  }, 60000)
 
   registerIpc()
 

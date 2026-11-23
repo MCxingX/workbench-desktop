@@ -4,6 +4,9 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
+import { compareVersion } from '../shared/version'
+
+export { compareVersion }
 
 /**
  * 绿色版（portable）在线更新。
@@ -127,15 +130,7 @@ function assetUrl(src: UpdateSource, repo: string, version: string, asset: strin
   return src.wrap(`https://github.com/${owner}/${name}/releases/download/v${version}/${asset}`)
 }
 
-export function compareVersion(a: string, b: string): number {
-  const pa = a.replace(/^v/i, '').split('.').map((x) => Number.parseInt(x.replace(/\D/g, ''), 10) || 0)
-  const pb = b.replace(/^v/i, '').split('.').map((x) => Number.parseInt(x.replace(/\D/g, ''), 10) || 0)
-  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const d = (pa[i] ?? 0) - (pb[i] ?? 0)
-    if (d !== 0) return d > 0 ? 1 : -1
-  }
-  return 0
-}
+// 版本比较在 @shared/version，主进程与测试共用同一份实现
 
 interface FetchSample {
   ok: boolean

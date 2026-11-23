@@ -316,6 +316,28 @@ export async function runSmoke(win: BrowserWindow, info: AppInfo): Promise<numbe
     })()`)
     push('Ctrl+, 能打开系统设置中心', settingsUi.opened && settingsUi.tabs >= 5, `tabs=${settingsUi.tabs} ${settingsUi.diag}`)
     push('单双周有独立页签与 6 周预览', settingsUi.weekRows >= 7, `rows=${settingsUi.weekRows}`)
+
+    // ── 更新页签：多节点探测表 + 状态机必须能渲染 ──
+    const upd = await evalJs<string>(`(async () => {
+      if (!document.querySelector(".sp")) {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: ',', ctrlKey: true, bubbles: true }))
+        await new Promise(r => setTimeout(r, 500))
+      }
+      const tab = [...document.querySelectorAll('.sp-tab')].find(b => (b.textContent || '').trim() === '更新')
+      if (!tab) return JSON.stringify({ pane: false, hasBtn: false, shape: false, why: 'no-tab' })
+      tab.click()
+      await new Promise(r => setTimeout(r, 350))
+      const pane = document.querySelector(".upd")
+      const hasBtn = pane ? !!([...pane.querySelectorAll("button")].find(b => (b.textContent || "").includes("检查更新"))) : false
+      const st = await window.wb.updateState()
+      const shape = !!st && typeof st.phase === "string" && Array.isArray(st.probes)
+      const close = [...document.querySelectorAll(".sp button")].find(b => (b.textContent || "").trim() === "关闭")
+      if (close) close.click()
+      await new Promise(r => setTimeout(r, 250))
+      return JSON.stringify({ pane: !!pane, hasBtn, shape })
+    })()`)
+    const u = JSON.parse(upd) as { pane: boolean; hasBtn: boolean; shape: boolean }
+    push('更新页签有节点探测表与检查按钮', u.pane && u.hasBtn && u.shape, upd)
     push('设置面板可关闭', settingsUi.closed)
 
     // ── M8：单双周真的生效（写入 → 读回 → 判定一致） ──
