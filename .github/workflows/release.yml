@@ -53,7 +53,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release/Workbench-*-portable.exe
+            release/Workbench-portable.exe
             release/version.json
           generate_release_notes: true
         env:
