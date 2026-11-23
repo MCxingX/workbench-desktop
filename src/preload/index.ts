@@ -31,6 +31,7 @@ const bridge: WbBridge = {
   backupList: () => invoke('backup:list'),
   backupAutoNow: () => invoke('backup:autoNow'),
   exportRedacted: (p?: string) => invoke('backup:exportRedacted', p),
+  pickDataDir: () => invoke<string | null>('datadir:pick'),
   migrateDataDir: (target: string) => invoke('datadir:migrate', target),
   openDataDir: () => invoke('app:openDataDir'),
 
@@ -82,6 +83,13 @@ const bridge: WbBridge = {
   updateCheck: () => invoke('update:check'),
   updateDownload: () => invoke('update:download'),
   updateApply: () => invoke('update:apply'),
+  logRecent: (limit?: number) => invoke('log:recent', limit),
+  logStats: () => invoke('log:stats'),
+  logReport: () => invoke('log:report'),
+  logExport: (targetDir?: string) => invoke('log:export', targetDir),
+  logOpenDir: () => invoke('log:openDir'),
+  logClear: () => invoke('log:clear'),
+  logFromRenderer: (level, scope, message) => ipcRenderer.send('log:renderer', level, scope, message),
   onUpdateState: (cb) => {
     const h = (_e: unknown, s: Parameters<typeof cb>[0]) => cb(s)
     ipcRenderer.on('update:state', h)

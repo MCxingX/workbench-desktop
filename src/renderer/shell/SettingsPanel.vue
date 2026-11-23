@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { AppInfo, LockState, ScheduleState, UiState, UpdateState } from '@shared/types'
+import type { AppInfo, LockState, LogEntry, LogStats, ScheduleState, UiState, UpdateState } from '@shared/types'
 import type { ShiftProfile, WeekVariant } from '@shared/schedule/model'
 import { validateProfile, variantOf, previewDays } from '@shared/schedule/resolve'
 import { addDays, mondayOf, ymd } from '@shared/schedule/time'
@@ -9,7 +9,7 @@ import { encodeShare, decodeShare } from '@shared/schedule/share-link'
 const props = defineProps<{ open: boolean; tab?: string }>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'saved'): void; (e: 'theme'): void }>()
 
-type Tab = 'schedule' | 'week' | 'lock' | 'data' | 'update' | 'about'
+type Tab = 'schedule' | 'week' | 'lock' | 'data' | 'update' | 'diag' | 'about'
 const tab = ref<Tab>('schedule')
 const TABS: { id: Tab; label: string }[] = [
   { id: 'schedule', label: '班表与工时' },
@@ -17,6 +17,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'lock', label: '应用锁' },
   { id: 'data', label: '数据与备份' },
   { id: 'update', label: '更新' },
+  { id: 'diag', label: '诊断' },
   { id: 'about', label: '关于' }
 ]
 
@@ -48,6 +49,50 @@ const autostartOn = ref(false)
 const plugins = ref<{ id: string; name: string; moduleId: string }[]>([])
 const pluginIssues = ref<{ file: string; message: string }[]>([])
 const shareText = ref('')
+
+// ── 诊断日志 ──
+const logs = ref<LogEntry[]>([])
+const logStat = ref<LogStats | null>(null)
+const diagMsg = ref('')
+
+function fmtBytes(n: number): string {
+  if (n > 1024 * 1024) return (n / 1024 / 1024).toFixed(1) + ' MB'
+  if (n > 1024) return (n / 1024).toFixed(0) + ' KB'
+  return n + ' B'
+}
+
+async function loadLogs(): Promise<void> {
+  logs.value = await window.wb.logRecent(160)
+  logStat.value = await window.wb.logStats()
+}
+
+async function copyReport(): Promise<void> {
+  try {
+    const text = await window.wb.logReport()
+    await navigator.clipboard.writeText(text)
+    diagMsg.value = '诊断信息已复制，粘给开发者即可'
+  } catch (err) {
+    diagMsg.value = '复制失败：' + (err as Error).message
+  }
+  window.setTimeout(() => (diagMsg.value = ''), 4000)
+}
+
+async function exportDiag(): Promise<void> {
+  const r = await window.wb.logExport()
+  diagMsg.value = '已导出：' + r.file
+  window.setTimeout(() => (diagMsg.value = ''), 6000)
+}
+
+async function openLogDir(): Promise<void> {
+  await window.wb.logOpenDir()
+}
+
+async function clearDiag(): Promise<void> {
+  logStat.value = await window.wb.logClear()
+  diagMsg.value = '错误计数已清零（日志文件不动）'
+  window.setTimeout(() => (diagMsg.value = ''), 3000)
+}
+
 
 // ── 在线更新 ──
 const upd = ref<UpdateState | null>(null)
@@ -99,6 +144,7 @@ onMounted(async () => {
   plugins.value = pl.plugins
   pluginIssues.value = pl.issues
   if (props.tab === 'week') tab.value = 'week'
+  await loadLogs()
   upd.value = await window.wb.updateState()
   offUpd = window.wb.onUpdateState((s) => {
     upd.value = s
@@ -308,12 +354,18 @@ async function doExport(): Promise<void> {
   const f = await window.wb.exportRedacted()
   flash(`打码导出 → ${String(f).split('\\').pop()}`)
 }
+async function doPickDir(): Promise<void> {
+  const dir = await window.wb.pickDataDir()
+  if (dir) migrateTo.value = dir
+}
+
 async function doMigrate(): Promise<void> {
-  if (!migrateTo.value.trim()) return fail('先填新目录')
+  if (!migrateTo.value.trim()) return fail('先选目录')
   try {
     const r = await window.wb.migrateDataDir(migrateTo.value.trim())
     await refreshData()
-    flash(`已迁移 ${r.files} 个文件到 ${migrateTo.value}，重启后生效`)
+    const info = await window.wb.info()
+    flash(`已切到 ${r.to}（${r.files} 个文件，当前库：${info.dataDir === r.to ? '新目录' : '仍是旧目录'}）`)
   } catch (e) {
     fail((e as Error).message)
   }
@@ -559,9 +611,14 @@ const maskOf = (v: WeekVariant | null): boolean[] => (v ? v.mask : [])
             <button class="mini" @click="openDir">打开</button>
           </div>
           <div class="row">
-            <input v-model="migrateTo" placeholder="迁到别的盘，如 H:\WorkbenchData" class="wide" />
-            <button class="mini" @click="doMigrate">迁移</button>
+            <input v-model="migrateTo" placeholder="新的数据目录，如 H:\WorkbenchData" class="wide" />
+            <button class="mini" @click="doPickDir">选择目录</button>
+            <button class="mini go" @click="doMigrate">迁移并切换</button>
           </div>
+          <p class="tip">
+            迁移会把库、备份、附件、导出、日志、插件全部复制过去，校验通过后立刻切到新目录 ——
+            不用重启，旧目录也不会再被写入（只留一张「已迁移到.txt」，删不删你决定）。
+          </p>
           <div class="row wrap">
             <span class="stat" v-if="stats">行数 <b>{{ stats.count }}</b> · {{ Math.round(stats.sizeBytes / 1024) }}KB</span>
             <span class="stat" v-for="(v, k) in stats?.counts ?? {}" :key="k">{{ k }}: <b>{{ v }}</b></span>
@@ -599,6 +656,43 @@ const maskOf = (v: WeekVariant | null): boolean[] => (v ? v.mask : [])
           </div>
           <div class="pl" v-for="p in plugins" :key="p.id">{{ p.name }} <em>→ {{ p.moduleId }}</em></div>
           <div class="issue" v-for="(i, idx) in pluginIssues" :key="idx">✕ {{ i.file }}：{{ i.message }}</div>
+        </template>
+
+        <template v-else-if="tab === 'diag'">
+          <div class="dg">
+            <div class="dg-row">
+              <span class="dg-k">错误</span>
+              <span class="dg-v" :class="{ bad: (logStat?.errors ?? 0) > 0 }">{{ logStat?.errors ?? 0 }} 条</span>
+              <span class="dg-k">日志</span>
+              <span class="dg-v mono">{{ fmtBytes(logStat?.bytes ?? 0) }}</span>
+              <span class="spacer" />
+              <button class="mini" @click="loadLogs">刷新</button>
+              <button class="mini" @click="openLogDir">打开日志目录</button>
+            </div>
+
+            <div class="dg-row">
+              <button class="mini go" @click="copyReport">复制诊断信息</button>
+              <button class="mini" @click="exportDiag">导出诊断包</button>
+              <button class="mini" @click="clearDiag">清零错误计数</button>
+              <span class="dg-msg">{{ diagMsg }}</span>
+            </div>
+
+            <p class="dg-path mono">{{ logStat?.file }}</p>
+
+            <div class="dg-list">
+              <div class="dg-item" v-for="(l, i) in logs.slice().reverse()" :key="i" :class="l.level">
+                <span class="dg-t">{{ l.at.slice(11, 19) }}</span>
+                <span class="dg-s">{{ l.scope }}</span>
+                <span class="dg-m">{{ l.message }}</span>
+              </div>
+              <div class="dg-empty" v-if="!logs.length">还没有日志</div>
+            </div>
+
+            <p class="dg-tip">
+              日志放在 %APPDATA%\Workbench\logs，不跟数据目录走 —— 数据目录本身可能就是故障源。
+              报错时点「复制诊断信息」发过来就行，里面只有版本、系统、路径和错误栈，没有你的待办和记录。
+            </p>
+          </div>
         </template>
 
         <template v-else-if="tab === 'update'">
@@ -981,6 +1075,105 @@ kbd {
   font-size: 12px;
   color: var(--text-muted);
   line-height: 1.5;
+}
+
+.dg {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dg-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-sm);
+}
+
+.dg-k {
+  color: var(--text-muted);
+}
+
+.dg-v {
+  color: var(--text-primary);
+  font-family: ui-monospace, Consolas, monospace;
+}
+
+.dg-v.bad {
+  color: var(--countdown-urgent);
+}
+
+.dg-msg {
+  font-size: 12px;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dg-path {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.dg-list {
+  height: 250px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-elev-1);
+  padding: 4px 6px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.dg-item {
+  display: flex;
+  gap: 8px;
+  padding: 1px 0;
+  border-bottom: 1px solid transparent;
+}
+
+.dg-item.error .dg-m {
+  color: var(--countdown-urgent);
+}
+
+.dg-item.warn .dg-m {
+  color: var(--countdown-warn);
+}
+
+.dg-item .dg-t {
+  color: var(--text-muted);
+  flex: 0 0 auto;
+}
+
+.dg-item .dg-s {
+  color: var(--accent);
+  flex: 0 0 auto;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.dg-item .dg-m {
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.dg-empty {
+  color: var(--text-muted);
+  padding: 8px;
+}
+
+.dg-tip {
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  margin: 0;
 }
 
 .upd {

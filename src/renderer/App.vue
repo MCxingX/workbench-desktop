@@ -140,7 +140,14 @@ function startIdleWatch(): void {
 function onUnhandled(e: PromiseRejectionEvent): void {
   const msg = (e.reason as Error)?.message ?? String(e.reason ?? '')
   errorText.value = '出错了：' + msg
+  window.wb.logFromRenderer('error', 'promise', msg)
   window.setTimeout(() => (errorText.value = ''), 5000)
+}
+
+// 界面里任何一个未捕获异常都要留下痕迹，用户报错时才能查
+function onWindowError(e: ErrorEvent): void {
+  const msg = (e.message || '未知错误') + (e.filename ? ' @ ' + e.filename + ':' + e.lineno : '')
+  window.wb.logFromRenderer('error', 'window', msg + (e.error?.stack ? '\n' + e.error.stack : ''))
 }
 
 onMounted(() => {
@@ -148,6 +155,7 @@ onMounted(() => {
   startIdleWatch()
   window.addEventListener('keydown', onKey)
   window.addEventListener('unhandledrejection', onUnhandled)
+  window.addEventListener('error', onWindowError)
   window.addEventListener('mousemove', bumpActivity, { passive: true })
   window.addEventListener('mousedown', bumpActivity, { passive: true })
   window.addEventListener('wheel', bumpActivity, { passive: true })
@@ -155,6 +163,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKey)
+  window.removeEventListener('unhandledrejection', onUnhandled)
+  window.removeEventListener('error', onWindowError)
   window.removeEventListener('mousemove', bumpActivity)
   window.removeEventListener('mousedown', bumpActivity)
   window.removeEventListener('wheel', bumpActivity)

@@ -3,6 +3,21 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { resolveDataDirInfo, readBootstrap, writeBootstrap } from './paths'
 import {
+  logInfo,
+  logWarn,
+  logError,
+  recentLogs,
+  logStats,
+  buildReport,
+  exportReport,
+  pruneLogs,
+  setEchoDir,
+  setLogDirForTest,
+  resetErrorCount,
+  fixedLogDir,
+  type DiagContext
+} from './log'
+import {
   checkForUpdate,
   downloadUpdate,
   applyUpdate,
@@ -10,6 +25,7 @@ import {
   onUpdateState,
   setSettingReader
 } from './update'
+import { keyFilePath } from './crypto'
 import { JsonStore } from './jsonstore'
 import { createTray, destroyTray, setTrayTooltip } from './tray'
 import { runSmoke } from './smoke'
@@ -75,6 +91,8 @@ const PRELOAD = path.join(__dirname, '..', 'preload', 'index.js')
 
 let mainWindow: BrowserWindow | null = null
 let dataDir = ''
+let dataDirSource = '未知'
+let storeError: string | null = null
 let trayTimer: NodeJS.Timeout | null = null
 let uiStore: JsonStore<UiState>
 
@@ -119,9 +137,11 @@ if (!gotLock) {
 // 兜底：漏网异常只记日志，不让主进程带着未落盘数据崩掉
 process.on('uncaughtException', (err) => {
   console.error('[uncaught]', err?.stack || String(err))
+  logError('uncaught', err)
 })
 process.on('unhandledRejection', (err) => {
   console.error('[unhandledRejection]', (err as Error)?.stack || String(err))
+  logError('unhandledRejection', err)
 })
 
 function createWindow(): BrowserWindow {
@@ -215,6 +235,39 @@ function createWindow(): BrowserWindow {
 }
 
 function registerIpc(): void {
+
+  // ── 诊断：隐藏日志，出问题能查 ──
+  const diagCtx = (): DiagContext => ({
+    dataDir,
+    dataDirSource,
+    masterKeyOk: (() => {
+      try {
+        return fs.existsSync(keyFilePath())
+      } catch {
+        return false
+      }
+    })(),
+    storeError
+  })
+
+  ipcMain.handle('log:recent', (_e, limit?: number) => recentLogs(limit ?? 120))
+  ipcMain.handle('log:stats', () => logStats())
+  ipcMain.handle('log:report', () => buildReport(diagCtx()))
+  ipcMain.handle('log:export', (_e, targetDir?: string) => {
+    const dir = targetDir || path.join(dataDir, 'exports')
+    const file = exportReport(diagCtx(), dir)
+    logInfo('diag', '导出诊断包 ' + file)
+    return { file }
+  })
+  ipcMain.handle('log:openDir', async () => { await shell.openPath(fixedLogDir()) })
+  ipcMain.handle('log:clear', () => { resetErrorCount(); return logStats() })
+  // 渲染层任何异常都送到这里：用户看到的红字 = 日志里的一行
+  ipcMain.on('log:renderer', (_e, level: 'info' | 'warn' | 'error', scope: string, message: string) => {
+    if (level === 'error') logError('renderer/' + scope, message)
+    else if (level === 'warn') logWarn('renderer/' + scope, message)
+    else logInfo('renderer/' + scope, message)
+  })
+
   ipcMain.handle('app:info', (): AppInfo => ({
     version: app.getVersion(),
     dataDir,
@@ -327,15 +380,71 @@ function registerIpc(): void {
     return { file: target, ...exportRedacted(dataDir, target) }
   })
 
-  ipcMain.handle('datadir:migrate', (_e, targetDir: string) => {
-    if (!targetDir || path.resolve(targetDir) === path.resolve(dataDir)) {
-      throw new Error('新目录与当前目录相同')
-    }
-    const report = copyDataDir(dataDir, targetDir)
+  ipcMain.handle('datadir:pick', async () => {
+    const res = await dialog.showOpenDialog(mainWindow!, {
+      title: '选择新的数据目录',
+      defaultPath: path.dirname(dataDir),
+      properties: ['openDirectory', 'createDirectory']
+    })
+    return res.canceled ? null : res.filePaths[0]
+  })
+
+  ipcMain.handle('datadir:migrate', async (_e, targetDir: string) => {
+    const target = path.resolve(targetDir)
+    const from = path.resolve(dataDir)
+    if (!target || target === from) throw new Error('新目录与当前目录相同')
+
+    // 1) 先落盘，再复制：不然复制出去的是旧快照
+    persistNow()
+    const report = copyDataDir(from, target)
     if (!report.verified) throw new Error('复制校验失败，已保留原目录，未切换')
+
+    // 2) 主密钥单独保存一份在数据目录里：换盘/换机时它就是救命的那把
+    try {
+      const keyFile = keyFilePath()
+      if (fs.existsSync(keyFile)) fs.copyFileSync(keyFile, path.join(target, 'master.key.copy'))
+    } catch (err) { logWarn('migrate', '密钥副本失败：' + (err as Error).message) }
+
+    // 3) 引导文件必须指向新目录，这才是"跟随"的根
+    //    测试模式（WB_DATA_DIR）绝不改写真实引导文件
+    const testing = !!process.env.WB_DATA_DIR?.trim()
     const b = readBootstrap()
-    if (b) writeBootstrap({ ...b, dataDir: targetDir })
-    return { from: dataDir, to: targetDir, ...report, restartRequired: true }
+    if (!testing) {
+      writeBootstrap({
+        dataDir: target,
+        version: b?.version ?? 1,
+        keyRef: b?.keyRef ?? 'workbench/master-key-v1',
+        lastOpenedAt: new Date().toISOString()
+      })
+    }
+
+    // 4) 立刻切过去：不切的话，界面还连着旧目录继续写，用户就会看到旧盘又"活"了
+    dataDir = target
+    dataDirSource = 'bootstrap.json 记录（迁移后）'
+    setEchoDir(target)
+    const reopened = await reopenStore(target)
+    if (!reopened) {
+      logError('migrate', '新目录重开失败，已回滚指针')
+      if (!testing) {
+        writeBootstrap({
+          dataDir: from,
+          version: b?.version ?? 1,
+          keyRef: b?.keyRef ?? 'workbench/master-key-v1',
+          lastOpenedAt: new Date().toISOString()
+        })
+      }
+      dataDir = from
+      await reopenStore(from)
+      throw new Error('新目录打不开，已回滚到原目录：' + target)
+    }
+
+    // 5) 旧目录留一张便条，不删任何东西（删数据这件事永远交给用户）
+    try {
+      fs.writeFileSync(path.join(from, '已迁移到.txt'), '数据已迁移到：' + target + '\n确认新目录能正常打开后，这个目录可以自己删除。', 'utf8')
+    } catch { /* 旧目录可能已经只读，不影响 */ }
+
+    logInfo('migrate', from + ' → ' + target + ` files=${report.files}`)
+    return { from, to: target, ...report, restartRequired: false }
   })
 
   ipcMain.handle('app:openDataDir', async () => {
@@ -479,11 +588,20 @@ app.on('second-instance', () => {
 })
 
 app.whenReady().then(async () => {
+  // 日志先就位：后面任何一步炸了都要留下痕迹
+  if (process.env.WB_DATA_DIR?.trim()) setLogDirForTest(require('node:path').join(process.env.WB_DATA_DIR.trim(), 'logs'))
+  logInfo('app', `启动 v${app.getVersion()} packaged=${app.isPackaged} pid=${process.pid}`)
+  pruneLogs()
+
   const resolved = resolveDataDirInfo()
   dataDir = resolved.dir
+  dataDirSource = process.env.WB_DATA_DIR?.trim() ? 'WB_DATA_DIR 环境变量（测试）' : readBootstrap() ? 'bootstrap.json 记录' : '默认路径'
+  setEchoDir(dataDir)
+  logInfo('dataDir', `${dataDir} ← ${dataDirSource}`)
   if (resolved.warn) {
     // 目录打不开就明说，绝不悄悄换个新目录让用户以为数据丢了
     console.error('[dataDir]', resolved.warn)
+    logError('dataDir', resolved.warn)
     void dialog.showMessageBox({
       type: 'warning',
       title: '数据目录打不开',
@@ -498,6 +616,8 @@ app.whenReady().then(async () => {
     // 打不开就说清楚：文件在哪、怎么救。绝不静默新建空库让用户以为数据没了
     const msg = (err as Error).message
     console.error('[store] open failed', msg)
+    logError('store', err)
+    storeError = msg
     const pick = await dialog.showMessageBox({
       type: 'error',
       title: '数据打不开',

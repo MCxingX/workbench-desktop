@@ -343,6 +343,67 @@ export async function runSmoke(win: BrowserWindow, info: AppInfo): Promise<numbe
     })()`)
     const u = JSON.parse(upd) as { pane: boolean; hasBtn: boolean; shape: boolean }
     push('更新页签有节点探测表与检查按钮', u.pane && u.hasBtn && u.shape, upd)
+
+    // ── 诊断页签：隐藏日志必须能看、能复制、能导出 ──
+    const diag = await evalJs<string>(`(async () => {
+      if (!document.querySelector('.sp')) {
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: ',', ctrlKey: true, bubbles: true }))
+        await new Promise(r => setTimeout(r, 500))
+      }
+      const tab = [...document.querySelectorAll('.sp-tab')].find(b => (b.textContent || '').trim() === '诊断')
+      if (!tab) return JSON.stringify({ pane: false, why: 'no-tab' })
+      tab.click()
+      await new Promise(r => setTimeout(r, 400))
+      const pane = document.querySelector('.dg')
+      const list = document.querySelector('.dg-list')
+      const btns = pane ? [...pane.querySelectorAll("button")].map(b => (b.textContent || "").trim()) : []
+      const stats = await window.wb.logStats()
+      const report = await window.wb.logReport()
+      const exp = await window.wb.logExport()
+      const hasCopy = btns.some(t => t.includes("复制诊断信息"))
+      const hasExport = btns.some(t => t.includes("导出诊断包"))
+      const reportOk = report.includes("Workbench 诊断信息") && report.includes("数据目录") && report.includes("最近日志")
+      return JSON.stringify({ pane: !!pane, list: !!list, hasCopy, hasExport, reportOk, statsOk: typeof stats.errors === 'number', file: exp.file, rows: document.querySelectorAll('.dg-item').length })
+    })()`)
+    const dg = JSON.parse(diag) as {
+      pane: boolean
+      list: boolean
+      hasCopy: boolean
+      hasExport: boolean
+      reportOk: boolean
+      statsOk: boolean
+      file: string
+      rows: number
+    }
+    push('诊断页签能看日志、能复制、能导出', dg.pane && dg.list && dg.hasCopy && dg.hasExport && dg.rows >= 1, `rows=${dg.rows}`)
+    push('诊断包导出成 txt 且含环境信息', dg.reportOk && dg.statsOk && !!dg.file, dg.file)
+
+    // ── 迁移：切过去就真的跟着走，旧目录不再被写 ──
+    const migrate = await evalJs<string>(`(async () => {
+      const before = await window.wb.info()
+      const target = before.dataDir + '-moved'
+      const r = await window.wb.migrateDataDir(target)
+      const after = await window.wb.info()
+      const st = await window.wb.storeInfo()
+      const files = await window.wb.storeStats()
+      const settings = await window.wb.settingsGet()
+      const note = (await window.wb.logRecent(50)).some(l => l.scope === 'migrate')
+      return JSON.stringify({ to: r.to, files: r.files, verified: r.verified, restart: r.restartRequired, dataDirNow: after.dataDir, storeFile: st.file, rows: files.count, keptSetting: settings.onboardingDone ?? null, note })
+    })()`)
+    const mg = JSON.parse(migrate) as {
+      to: string
+      files: number
+      verified: boolean
+      restart: boolean
+      dataDirNow: string
+      storeFile: string
+      rows: number
+      keptSetting: string | null
+      note: boolean
+    }
+    push('迁移后立刻切到新目录（不用重启）', mg.verified && mg.restart === false && mg.dataDirNow === mg.to && mg.storeFile.startsWith(mg.to), `to=${mg.to} store=${mg.storeFile}`)
+    push('迁移后数据还在（库行数不变）', mg.rows > 0 && mg.files > 0, `files=${mg.files} rows=${mg.rows}`)
+    push('迁移过程写进日志', mg.note)
     push('设置面板可关闭', settingsUi.closed)
 
     // ── M8：单双周真的生效（写入 → 读回 → 判定一致） ──

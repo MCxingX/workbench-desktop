@@ -144,6 +144,25 @@ export interface ParsePreview {
 }
 
 /** 渲染进程可见的桥接 API（preload 暴露为 window.wb） */
+
+// ── 诊断日志 ──
+export type LogLevel = 'info' | 'warn' | 'error'
+
+export interface LogEntry {
+  at: string
+  level: LogLevel
+  scope: string
+  message: string
+}
+
+export interface LogStats {
+  dir: string
+  file: string
+  bytes: number
+  errors: number
+  entries: number
+}
+
 // ── 在线更新 ──
 export type UpdatePhase = 'idle' | 'probing' | 'downloading' | 'ready' | 'applying' | 'error'
 
@@ -207,6 +226,7 @@ export interface WbBridge {
   backupList(): Promise<{ name: string; path: string; size: number; at: string }[]>
   backupAutoNow(): Promise<{ created: boolean; file?: string; pruned: number }>
   exportRedacted(path?: string): Promise<{ file: string; rows: number; tables: string[] }>
+  pickDataDir(): Promise<string | null>
   migrateDataDir(target: string): Promise<{ from: string; to: string; files: number; verified: boolean; restartRequired: boolean }>
   openDataDir(): Promise<void>
 
@@ -271,6 +291,15 @@ export interface WbBridge {
   updateDownload(): Promise<UpdateState>
   updateApply(): Promise<void>
   onUpdateState(cb: (s: UpdateState) => void): () => void
+
+  /** 诊断日志 */
+  logRecent(limit?: number): Promise<LogEntry[]>
+  logStats(): Promise<LogStats>
+  logReport(): Promise<string>
+  logExport(targetDir?: string): Promise<{ file: string }>
+  logOpenDir(): Promise<void>
+  logClear(): Promise<LogStats>
+  logFromRenderer(level: LogLevel, scope: string, message: string): void
   /** 冒烟专用：写入 → 落盘 → 重开库 → 读回，用来验证「重启后还在」 */
   settingsPersistProbe(key: string, value: string): Promise<string>
 
