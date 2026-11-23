@@ -3,6 +3,8 @@ import type {
   BaseShift,
   CountdownState,
   HM,
+  Lunch,
+  MonthLunch,
   Piece,
   PersonalOverride,
   ResolvedDay,
@@ -65,6 +67,28 @@ export function validateProfile(p: ShiftProfile): ValidationIssue[] {
 
   if (!p.mask.some(Boolean)) issues.push({ field: '周掩码', message: '一周七天都不是工作日，请至少选一天' })
 
+  // 单双月午休：两侧分别校验，空的一侧表示沿用基础午休
+  const ml = p.monthLunch
+  if (ml?.enabled) {
+    const sides: [string, Lunch | null][] = [['单月午休', ml.odd ?? null], ['双月午休', ml.even ?? null]]
+    for (const [label, lunch] of sides) {
+      if (!lunch) continue
+      try {
+        const ls = parseHM(lunch.start)
+        const le = parseHM(lunch.end)
+        const ss = parseHM(p.base.start)
+        const ee = parseHM(p.base.end)
+        if (ls >= le) issues.push({ field: label, message: `${label}结束 ${lunch.end} 不晚于开始 ${lunch.start}` })
+        const overnight = ee <= ss
+        if (!overnight && (ls < ss || le > ee)) {
+          issues.push({ field: label, message: `${label} ${lunch.start}–${lunch.end} 超出班次 ${p.base.start}–${p.base.end}` })
+        }
+      } catch {
+        issues.push({ field: label, message: `${label}时间格式应为 HH:mm` })
+      }
+    }
+  }
+
   if (p.weekCycle.mode === 'alternate') {
     if (!p.weekCycle.primary || !p.weekCycle.secondary) {
       issues.push({ field: '两周交替', message: '启用两周交替需要两套设置都填好' })
@@ -110,10 +134,34 @@ function patchShift(base: BaseShift, patch?: Partial<BaseShift> | null): BaseShi
   }
 }
 
-/** 该日生效的班次（基础 + 月覆盖 + 两周交替变体） */
+/** 单双月午休的兜底读取：老数据没有这个字段就是关闭 */
+export function monthLunchOf(p: ShiftProfile): MonthLunch | null {
+  const ml = p.monthLunch
+  if (!ml || !ml.enabled) return null
+  if (!ml.odd && !ml.even) return null
+  return ml
+}
+
+/** 该月生效的单双月午休（奇数月 / 偶数月） */
+export function monthLunchFor(p: ShiftProfile, dateStr: string): Lunch | null {
+  const ml = monthLunchOf(p)
+  if (!ml) return null
+  const month = Number(dateStr.slice(5, 7))
+  if (!month) return null
+  return month % 2 === 1 ? ml.odd : ml.even
+}
+
+/** 该日生效的班次（基础 + 月覆盖 + 两周交替变体 + 单双月午休） */
 export function effectiveShift(p: ShiftProfile, dateStr: string, variantShift?: BaseShift | null): BaseShift {
   const mo = monthOverrideOf(p, dateStr)
-  return patchShift(variantShift ?? p.base, mo?.shift ?? null)
+  let shift = patchShift(variantShift ?? p.base, mo?.shift ?? null)
+  // 逐月规则指名了午休就以它为准；否则再看单双月
+  const overrideTouchedLunch = mo?.shift?.lunch !== undefined
+  if (!overrideTouchedLunch) {
+    const ml = monthLunchFor(p, dateStr)
+    if (ml) shift = { ...shift, lunch: ml }
+  }
+  return shift
 }
 
 /** 两周交替：该周用哪一套 */

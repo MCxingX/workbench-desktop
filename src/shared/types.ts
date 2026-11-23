@@ -209,6 +209,14 @@ export interface WbBridge {
   scheduleGet(): Promise<ScheduleState>
   scheduleSave(next: ScheduleState): Promise<ScheduleState>
   schedulePresets(): Promise<ShiftProfile[]>
+  schedulePreview(date: string): Promise<{
+    date: string
+    onDuty: boolean
+    shift: { start: string; end: string; lunch: { start: string; end: string } | null } | null
+    lunch: { start: string; end: string } | null
+    pieces: { from: number; to: number; kind: string }[]
+    trail: string[]
+  } | null>
   onScheduleChanged(cb: (s: ScheduleState) => void): void
   checkinMonthSummary(ym: string): Promise<{ done: number; expected: number; missing: number }>
   setFullscreen(on: boolean): Promise<void>

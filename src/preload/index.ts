@@ -15,6 +15,7 @@ const bridge: WbBridge = {
   scheduleGet: () => invoke<ScheduleState>('schedule:get'),
   scheduleSave: (next: ScheduleState) => invoke('schedule:save', next),
   schedulePresets: () => invoke<ShiftProfile[]>('schedule:presets'),
+  schedulePreview: (date: string) => invoke('schedule:preview', date),
   onScheduleChanged: (cb) => {
     ipcRenderer.on('schedule:changed', (_e, s: ScheduleState) => cb(s))
   },

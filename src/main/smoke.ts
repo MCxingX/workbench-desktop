@@ -2,6 +2,7 @@ import type { BrowserWindow } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
 import { loadPlugins, writeSampleManifest } from './plugins'
+import { readBootstrap } from './paths'
 import { listBackups, autoBackup } from './backup'
 import { run as runSql } from './store'
 import type { AppInfo } from '../shared/types'
@@ -223,6 +224,18 @@ export async function runSmoke(win: BrowserWindow, info: AppInfo): Promise<numbe
       return { text: t.text, hasDue: !!t.due_at, worklogAfter: after - before, summary, cleaned: t.text.indexOf('明天') < 0 }
     })()`)
     push('待办一句话入库并识别时间', todoFlow.cleaned && todoFlow.hasDue, `text=${todoFlow.text}`)
+
+    // ── 待办时间必须跟着班表：下午 = 你的下班时刻，不是写死 18:00 ──
+    const due = await evalJs<string>(`(async () => {
+      const today = new Date().toLocaleDateString("sv-SE")
+      const preview = await window.wb.schedulePreview(today)
+      const t = await window.wb.todoAdd("下午把周报发给张总")
+      await window.wb.todoDelete(t.id)
+      return JSON.stringify({ shiftEnd: preview && preview.shift ? preview.shift.end : null, due: t.due_at })
+    })()`)
+    const dd = JSON.parse(due) as { shiftEnd: string | null; due: string | null }
+    const dueHM = dd.due ? dd.due.slice(11, 16) : null
+    push('待办「下午」跟着班表下班时间走', !!dd.shiftEnd && dueHM === dd.shiftEnd, `下班=${dd.shiftEnd} 待办=${dueHM}`)
     push('完成待办自动写记录', todoFlow.worklogAfter === 1)
     push('今日小结可直接粘贴', todoFlow.summary.includes('完成：') && /^1\. /m.test(todoFlow.summary))
 
@@ -379,6 +392,7 @@ export async function runSmoke(win: BrowserWindow, info: AppInfo): Promise<numbe
     push('诊断包导出成 txt 且含环境信息', dg.reportOk && dg.statsOk && !!dg.file, dg.file)
 
     // ── 迁移：切过去就真的跟着走，旧目录不再被写 ──
+    const bootBefore = JSON.stringify(readBootstrap())
     const migrate = await evalJs<string>(`(async () => {
       const before = await window.wb.info()
       const target = before.dataDir + '-moved'
@@ -404,6 +418,36 @@ export async function runSmoke(win: BrowserWindow, info: AppInfo): Promise<numbe
     push('迁移后立刻切到新目录（不用重启）', mg.verified && mg.restart === false && mg.dataDirNow === mg.to && mg.storeFile.startsWith(mg.to), `to=${mg.to} store=${mg.storeFile}`)
     push('迁移后数据还在（库行数不变）', mg.rows > 0 && mg.files > 0, `files=${mg.files} rows=${mg.rows}`)
     push('迁移过程写进日志', mg.note)
+    const bootAfter = JSON.stringify(readBootstrap())
+    push('迁移测试没有改动真实引导文件', bootBefore === bootAfter, bootAfter)
+
+    // ── 单双月午休：单月 12:00-13:30 / 双月 12:00-13:00 ──
+    const ml = await evalJs<string>(`(async () => {
+      const st = await window.wb.scheduleGet()
+      const p = st.profiles.find(x => x.id === st.activeId)
+      const before = JSON.parse(JSON.stringify(p))
+      // 1 月是单月、2 月是双月，各取一天看真正解析出来的午休
+      const oddDay = (new Date().getFullYear() + 1) + "-01-15"
+      const evenDay = (new Date().getFullYear() + 1) + "-02-15"
+      const draft = { ...before, monthLunch: { enabled: true, odd: { start: "12:00", end: "13:30" }, even: { start: "12:00", end: "13:00" } } }
+      await window.wb.scheduleSave({ ...st, profiles: st.profiles.map(x => x.id === p.id ? draft : x) })
+      const back = await window.wb.scheduleGet()
+      const saved = back.profiles.find(x => x.id === p.id)
+      const a = await window.wb.schedulePreview(oddDay)
+      const b = await window.wb.schedulePreview(evenDay)
+      await window.wb.scheduleSave({ ...st, profiles: st.profiles.map(x => x.id === p.id ? before : x) })
+      const restored = (await window.wb.scheduleGet()).profiles.find(x => x.id === p.id)
+      return JSON.stringify({
+        kept: !!saved.monthLunch && saved.monthLunch.enabled === true,
+        oddLunch: a.lunch,
+        evenLunch: b.lunch,
+        restored: !restored.monthLunch || !restored.monthLunch.enabled
+      })
+    })()`)
+    const m = JSON.parse(ml) as { kept: boolean; oddLunch: { start: string; end: string } | null; evenLunch: { start: string; end: string } | null; restored: boolean }
+    push('单双月午休能存进库并读回', m.kept)
+    push('单月按 12:00–13:30、双月按 12:00–13:00 生效', m.oddLunch?.end === '13:30' && m.evenLunch?.end === '13:00', `odd=${JSON.stringify(m.oddLunch)} even=${JSON.stringify(m.evenLunch)}`)
+    push('关掉后午休回到基础值', m.restored)
     push('设置面板可关闭', settingsUi.closed)
 
     // ── M8：单双周真的生效（写入 → 读回 → 判定一致） ──

@@ -41,6 +41,19 @@ export interface WeekCycle {
   secondary: WeekVariant | null
 }
 
+/**
+ * 单双月午休：奇数月（1/3/5…）和偶数月（2/4/6…）用不同午休。
+ * 只动午休，上下班时间沿用基础时段 —— 很多公司的夏令时/冬令时只调午休。
+ * null 表示该侧沿用基础午休。
+ */
+export interface MonthLunch {
+  enabled: boolean
+  odd: Lunch | null
+  even: Lunch | null
+  /** 展示用说明，如 "夏季 12:00-13:30" */
+  note?: string
+}
+
 /** 逐月覆盖：某个月整体换时段 / 换掩码 */
 export interface MonthOverride {
   /** YYYY-MM */
@@ -89,6 +102,8 @@ export interface ShiftProfile {
   mask: boolean[]
   useHolidays: boolean
   weekCycle: WeekCycle
+  /** 旧数据可能没有这个字段，读取一律走 monthLunchOf() */
+  monthLunch?: MonthLunch
   monthOverrides: MonthOverride[]
   holidays: HolidaySpan[]
   makeups: MakeupWorkday[]

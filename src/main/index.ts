@@ -31,7 +31,7 @@ import { createTray, destroyTray, setTrayTooltip } from './tray'
 import { runSmoke } from './smoke'
 import { getScheduleState, saveScheduleState, presets, importLegacySchedule, setSetting as setSettingValue } from './scheduleStore'
 import { validateProfile } from '../shared/schedule/resolve'
-import { computeCountdown } from '../shared/schedule/resolve'
+import { computeCountdown, resolveDay } from '../shared/schedule/resolve'
 import { openStore, closeStore, reopenStore, persistNow, dataFilePath, persistStats, persistError, storeInfo, onPersistError, isOpen, audit } from './store'
 import { createBackup, restoreBackup, exportRedacted, copyDataDir, tableCounts, listBackups, autoBackup } from './backup'
 import {
@@ -339,6 +339,14 @@ function registerIpc(): void {
   })
   ipcMain.handle('schedule:presets', () => presets())
 
+  ipcMain.handle('schedule:preview', (_e, date: string) => {
+    const st = getScheduleState()
+    const p = st.profiles.find((x) => x.id === st.activeId) ?? st.profiles[0]
+    if (!p) return null
+    const day = resolveDay(p, date)
+    return { date, onDuty: day.attendance.onDuty, shift: day.shift, lunch: day.lunch, pieces: day.pieces, trail: day.trail }
+  })
+
   ipcMain.handle('window:fullscreen', (_e, on: boolean): void => {
     mainWindow?.setFullScreen(on)
   })
@@ -556,10 +564,13 @@ function registerIpc(): void {
   ipcMain.handle('lock:resetByRecovery', (_e, code: string, newPw: string) => resetByRecovery(code, newPw))
 
   // ── 系统集成 ──
-  ipcMain.handle('app:autostart', () => app.getLoginItemSettings().openAtLogin)
+  // 绿色版真正的 exe 是 PORTABLE_EXECUTABLE_PATH；用 process.execPath 会指向
+  // %TEMP% 里的解压副本，重启后那个路径就没了 → 自启必然失效
+  const selfExe = (): string => process.env.PORTABLE_EXECUTABLE_PATH || process.execPath
+  ipcMain.handle('app:autostart', () => app.getLoginItemSettings({ path: selfExe() }).openAtLogin)
   ipcMain.handle('app:setAutostart', (_e, on: boolean) => {
-    app.setLoginItemSettings({ openAtLogin: on, args: ['--hidden'] })
-    return app.getLoginItemSettings().openAtLogin
+    app.setLoginItemSettings({ openAtLogin: on, path: selfExe(), args: ['--hidden'] })
+    return app.getLoginItemSettings({ path: selfExe() }).openAtLogin
   })
   ipcMain.handle('app:trayTip', () => trayTip(activeProfileSafe()))
 
@@ -588,6 +599,10 @@ app.on('second-instance', () => {
 })
 
 app.whenReady().then(async () => {
+  // 冒烟一律跑在临时目录：即使调用方忘了设 WB_DATA_DIR，也不许碰真实数据
+  if (SMOKE && !process.env.WB_DATA_DIR?.trim()) {
+    process.env.WB_DATA_DIR = path.join(app.getPath('temp'), 'Workbench-smoke-auto')
+  }
   // 日志先就位：后面任何一步炸了都要留下痕迹
   if (process.env.WB_DATA_DIR?.trim()) setLogDirForTest(require('node:path').join(process.env.WB_DATA_DIR.trim(), 'logs'))
   logInfo('app', `启动 v${app.getVersion()} packaged=${app.isPackaged} pid=${process.pid}`)

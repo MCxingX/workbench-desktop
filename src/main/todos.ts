@@ -1,5 +1,7 @@
 import { query, run, transaction, audit } from './store'
-import { parseQuickTodo } from '../shared/parse/quick'
+import { parseQuickTodo, type TimeAnchors } from '../shared/parse/quick'
+import { getScheduleState } from './scheduleStore'
+import { resolveDay } from '../shared/schedule/resolve'
 import { parseChat, type ParseResult } from '../shared/parse/parser'
 import { ymd } from '../shared/schedule/time'
 
@@ -40,6 +42,30 @@ export interface KnowledgeRow {
 
 const uid = (p: string): string => `${p}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
 
+/**
+ * 今天的时刻锚点来自班表：下班几点就是几点，"下午/下班前"不再写死 18:00。
+ * 拿不到班表就返回 null，解析器会退回内置默认值。
+ */
+export function todayAnchors(): TimeAnchors | null {
+  try {
+    const st = getScheduleState()
+    const p = st.profiles.find((x) => x.id === st.activeId) ?? st.profiles[0]
+    if (!p) return null
+    const day = resolveDay(p, ymd(new Date()))
+    const shift = day.shift ?? p.base
+    // 跨零点夜班（如 22:00–06:00）按"次日早上"理解，"下午"就落到次日收工
+    const end = shift.end <= shift.start ? shift.end : shift.end
+    return {
+      workStart: shift.start,
+      workEnd: end,
+      lunchStart: day.lunch?.start ?? null,
+      lunchEnd: day.lunch?.end ?? null
+    }
+  } catch {
+    return null
+  }
+}
+
 /** 待办列表：open = 未完成；today = 未完成且今天到期/无期限；all = 全部未完成 */
 export function listTodos(scope: 'open' | 'today' | 'all' = 'open'): TodoRow[] {
   const base = 'SELECT * FROM todos WHERE done_at IS NULL'
@@ -56,7 +82,7 @@ export function listDone(limit = 50): TodoRow[] {
 }
 
 export function addTodo(input: string, opts?: { category?: string; priority?: number; dueAt?: string; source?: string }): TodoRow {
-  const q = parseQuickTodo(input)
+  const q = parseQuickTodo(input, new Date(), todayAnchors())
   const row: TodoRow = {
     id: uid('td'),
     text: q.text,

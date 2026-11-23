@@ -13,7 +13,7 @@ type Tab = 'schedule' | 'week' | 'lock' | 'data' | 'update' | 'diag' | 'about'
 const tab = ref<Tab>('schedule')
 const TABS: { id: Tab; label: string }[] = [
   { id: 'schedule', label: '班表与工时' },
-  { id: 'week', label: '单双周 / 大小周' },
+  { id: 'week', label: '单双周 / 单双月' },
   { id: 'lock', label: '应用锁' },
   { id: 'data', label: '数据与备份' },
   { id: 'update', label: '更新' },
@@ -45,6 +45,31 @@ const resetPw = ref('')
 const stats = ref<Awaited<ReturnType<typeof window.wb.storeStats>> | null>(null)
 const backups = ref<{ name: string; path: string; size: number; at: string }[]>([])
 const migrateTo = ref('')
+
+// ── 单双月午休 ──
+const monthLunchOn = computed(() => !!draft.value?.monthLunch?.enabled)
+const curMonthOdd = computed(() => new Date().getMonth() % 2 === 0)
+
+function setMonthLunch(on: boolean): void {
+  if (!draft.value) return
+  if (!on) {
+    draft.value.monthLunch = { enabled: false, odd: null, even: null }
+    return
+  }
+  const base = draft.value.base.lunch
+  draft.value.monthLunch = {
+    enabled: true,
+    odd: draft.value.monthLunch?.odd ?? (base ? { ...base } : { start: '12:00', end: '13:00' }),
+    even: draft.value.monthLunch?.even ?? (base ? { ...base } : { start: '12:00', end: '13:00' })
+  }
+}
+
+function setMonthLunchSide(side: 'odd' | 'even', on: boolean): void {
+  if (!draft.value?.monthLunch) return
+  const base = draft.value.base.lunch
+  draft.value.monthLunch[side] = on ? (base ? { ...base } : { start: '12:00', end: '13:00' }) : null
+}
+
 const autostartOn = ref(false)
 const plugins = ref<{ id: string; name: string; moduleId: string }[]>([])
 const pluginIssues = ref<{ file: string; message: string }[]>([])
@@ -551,6 +576,41 @@ const maskOf = (v: WeekVariant | null): boolean[] => (v ? v.mask : [])
             <p class="tip">大小周＝A 套上 6 天、B 套上 5 天；单双周＝两套时段或上班日不同，都在这两格里配。</p>
           </template>
           <p class="tip" v-else>不启用时，全周统一按「常规上班日」判定。临时某一周特殊 → 用「班表与工时」里的法定假期/补班，或到考勤月历里单独补记。</p>
+
+          <h3>单双月午休</h3>
+          <div class="row">
+            <label>启用</label>
+            <select :value="monthLunchOn ? 'on' : 'off'" @change="setMonthLunch(($event.target as HTMLSelectElement).value === 'on')">
+              <option value="off">不启用（每月午休一样）</option>
+              <option value="on">启用（单月 / 双月各一套）</option>
+            </select>
+            <span class="hint" v-if="monthLunchOn">本月是 <b>{{ curMonthOdd ? '单月' : '双月' }}</b>，按 {{ curMonthOdd ? '单月' : '双月' }}那行算</span>
+          </div>
+
+          <template v-if="monthLunchOn && draft.monthLunch">
+            <div class="weekgrid">
+              <div class="wk" v-for="side in (['odd', 'even'] as const)" :key="side">
+                <div class="wk-head">
+                  <span class="name">{{ side === 'odd' ? '单月（1/3/5/7/9/11）' : '双月（2/4/6/8/10/12）' }}</span>
+                </div>
+                <div class="row">
+                  <label>午休</label>
+                  <select
+                    :value="draft.monthLunch[side] ? 'on' : 'off'"
+                    @change="setMonthLunchSide(side, ($event.target as HTMLSelectElement).value === 'on')"
+                  >
+                    <option value="on">有</option><option value="off">沿用基础午休</option>
+                  </select>
+                  <template v-if="draft.monthLunch[side]">
+                    <input type="time" v-model="draft.monthLunch[side]!.start" />
+                    <input type="time" v-model="draft.monthLunch[side]!.end" />
+                  </template>
+                </div>
+              </div>
+            </div>
+            <p class="tip">只改午休，上下班时间仍用「班表与工时」里的基础时段。写「沿用基础午休」的那一侧会跟着基础走。</p>
+          </template>
+
         </template>
 
         <!-- 应用锁 -->
