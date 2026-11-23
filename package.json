@@ -1,0 +1,42 @@
+{
+  "name": "workbench",
+  "version": "1.0.0",
+  "description": "本地优先个人工作台（倒计时 / 到岗 / 待办 / 今日记录）",
+  "author": "YG",
+  "license": "MIT",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YG/workbench-desktop.git"
+  },
+  "main": "dist/node/main/index.js",
+  "scripts": {
+    "build:main": "tsc -p tsconfig.node.json",
+    "build:renderer": "vite build",
+    "build": "npm run build:main && npm run build:renderer",
+    "typecheck": "vue-tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "test": "vitest run",
+    "smoke": "node scripts/smoke.mjs",
+    "verify": "npm run typecheck && npm run test && npm run smoke",
+    "dev": "node scripts/dev.mjs",
+    "dist": "npm run build && electron-builder --win portable",
+    "release:manifest": "node scripts/release.mjs",
+    "icon": "python scripts/make-icon.py"
+  },
+  "dependencies": {
+    "sql.js": "^1.13.0",
+    "exceljs": "^4.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "electron": "^33.3.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "vitest": "^2.1.8",
+    "vue": "^3.5.13",
+    "vue-tsc": "^2.1.10"
+  }
+}
+

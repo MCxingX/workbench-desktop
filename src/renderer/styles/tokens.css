@@ -1,0 +1,83 @@
+/* ── 设计 token（对照 docs/06 UI 设计规范）── */
+:root {
+  --accent: #2f6fe0;
+  --accent-dim: #255bbd;
+  --countdown-ok: #35c66b;
+  --countdown-warn: #f0b400;
+  --countdown-urgent: #ff5c5c;
+  --countdown-overtime: #b07cff;
+  --countdown-rest: #6b7684;
+
+  --fs-display: 56px;
+  --fs-h1: 20px;
+  --fs-h2: 16px;
+  --fs-body: 14px;
+  --fs-sm: 12px;
+  --fs-xs: 11px;
+  --fs-meta: 12px;
+  /* 主数据（番茄钟读数）与统一行高/行首槽位 */
+  --fs-h0: 34px;
+  --list-row: 26px;
+  --slot: 16px;
+  /* 下面几个以前只在用法里出现过，从未定义 → 选中态/悬停底色/锁屏层级全失效 */
+  --bg-base: var(--bg-app);
+  --accent-weak: color-mix(in srgb, var(--accent) 18%, transparent);
+  --bg-hover: color-mix(in srgb, var(--text-primary) 7%, transparent);
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  --row-h: 88px;
+  --gap: 12px;
+
+  --z-card: 1;
+  --z-lock: 100;
+  --z-overlay: 40;
+  --z-palette: 60;
+  --z-toast: 80;
+
+  --motion-fast: 120ms cubic-bezier(0.4, 0, 0.2, 1);
+  --motion-base: 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* 暗色（默认） */
+[data-theme='dark'] {
+  --bg-app: #0e1116;
+  --bg-elev-1: #161b22;
+  --bg-elev-2: #1c232c;
+  --bg-elev-3: #232b36;
+  --border: #2a323d;
+  --border-strong: #3a4553;
+  --text-primary: #e8ecf1;
+  --text-secondary: #a7b3c2;
+  --text-muted: #8794a5;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.24);
+}
+
+/* 亮色 */
+[data-theme='light'] {
+  --bg-app: #f4f6f9;
+  --bg-elev-1: #ffffff;
+  --bg-elev-2: #f7f9fc;
+  --bg-elev-3: #eef2f7;
+  --border: #e2e7ef;
+  --border-strong: #cbd4e0;
+  --text-primary: #11161d;
+  --text-secondary: #48546a;
+  --text-muted: #66707e;
+  /* 亮色下这几条原色太浅，白底上几乎看不见 */
+  --countdown-ok: #17703b;
+  --countdown-warn: #8a6100;
+  --countdown-urgent: #c62828;
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.06), 0 8px 24px rgba(16, 24, 40, 0.08);
+}
+

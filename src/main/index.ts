@@ -1,0 +1,700 @@
+import { app, BrowserWindow, ipcMain, shell, dialog, globalShortcut , Notification } from 'electron'
+import fs from 'node:fs'
+import path from 'node:path'
+import { resolveDataDirInfo, readBootstrap, writeBootstrap } from './paths'
+import {
+  checkForUpdate,
+  downloadUpdate,
+  applyUpdate,
+  getUpdateState,
+  onUpdateState,
+  setSettingReader
+} from './update'
+import { JsonStore } from './jsonstore'
+import { createTray, destroyTray, setTrayTooltip } from './tray'
+import { runSmoke } from './smoke'
+import { getScheduleState, saveScheduleState, presets, importLegacySchedule, setSetting as setSettingValue } from './scheduleStore'
+import { validateProfile } from '../shared/schedule/resolve'
+import { computeCountdown } from '../shared/schedule/resolve'
+import { openStore, closeStore, reopenStore, persistNow, dataFilePath, persistStats, persistError, storeInfo, onPersistError, isOpen, audit } from './store'
+import { createBackup, restoreBackup, exportRedacted, copyDataDir, tableCounts, listBackups, autoBackup } from './backup'
+import {
+  listTodos,
+  listDone,
+  addTodo,
+  completeTodo,
+  uncompleteTodo,
+  updateTodo,
+  deleteTodo,
+  reorderTodos,
+  listWorklog,
+  addWorklog,
+  deleteWorklog,
+  updateWorklog,
+  worklogDays,
+  dailySummary,
+  listKnowledge,
+  addKnowledge,
+  deleteKnowledge,
+  updateKnowledge,
+  knowledgeScopes,
+  parsePaste,
+  applyPaste,
+  setSettingBool
+} from './todos'
+import {
+  getCheckin,
+  markCheckin,
+  updateCheckin,
+  deleteCheckin,
+  checkinStats,
+  checkinCalendar,
+  markManyCheckins,
+  monthSummary,
+  workDayOf,
+  rangeCheckins,
+  exportCheckins,
+  getSettings,
+  settingSet,
+  todayStr
+} from './checkin'
+import { lockState, setPassword, changePassword, disableLock, setAutoLockMinutes, lockNow, unlock, issueRecoveryCode, resetByRecovery, hasRecoveryCode, recoveryHint, setRecoveryHint } from './lock'
+import { listNotes, addNote, updateNote, deleteNote, recordPomodoro, pomodoroToday, PALETTE_ACTIONS } from './extras'
+import { loadPlugins, writeSampleManifest, BUILTIN_MODULE_IDS } from './plugins'
+import { DEFAULT_UI_STATE, LAYOUT_VERSION, type UiState, type AppInfo, type ScheduleState, type TodoRow } from '../shared/types'
+import { migrateLayout } from '../shared/layout'
+
+app.setName('Workbench')
+
+const SMOKE = process.argv.includes('--smoke')
+// 排版只能靠眼睛看：--shot 启动 → 跳过导览 → 截一张主界面 PNG 后退出
+const SHOT = process.argv.includes('--shot')
+const HIDDEN = process.argv.includes('--hidden')
+const RENDERER_INDEX = path.join(__dirname, '..', '..', 'renderer', 'index.html')
+const PRELOAD = path.join(__dirname, '..', 'preload', 'index.js')
+
+let mainWindow: BrowserWindow | null = null
+let dataDir = ''
+let trayTimer: NodeJS.Timeout | null = null
+let uiStore: JsonStore<UiState>
+
+/** 托盘/后台用的当前班表 */
+function activeProfileSafe() {
+  const s = getScheduleState()
+  return s.profiles.find((p) => p.id === s.activeId) ?? s.profiles[0] ?? null
+}
+
+/** 托盘提示：还剩多久下班 */
+function trayTip(profile: ReturnType<typeof activeProfileSafe>): string {
+  if (!profile) return '工作台 · 未配置班表'
+  const c = computeCountdown(profile, new Date())
+  const fmt = (sec: number): string => {
+    const s = Math.max(0, Math.floor(sec))
+    return `${Math.floor(s / 3600)}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}`
+  }
+  switch (c.phase) {
+    case 'working':
+      return `距下班 ${fmt(c.wallRemainingSec)} · ${profile.name}`
+    case 'lunch':
+      return `午休中 · 距下班 ${fmt(c.wallRemainingSec)}`
+    case 'overtime':
+      return `已加班 ${fmt(c.overtimeSec)}`
+    case 'before':
+      return `距上班 ${fmt(c.untilStartSec)}`
+    case 'after':
+    case 'off':
+      return `休息中 · 距上班 ${fmt(c.untilStartSec || c.tomorrowStartSec)}`
+    default:
+      return `工作台 · ${profile.name}`
+  }
+}
+
+const gotLock = app.requestSingleInstanceLock()
+if (!gotLock) {
+  // 必须硬退出：否则 whenReady 仍会 openStore，两个进程各写一份加密库 → 后写覆盖先写
+  app.quit()
+  process.exit(0)
+}
+
+// 兜底：漏网异常只记日志，不让主进程带着未落盘数据崩掉
+process.on('uncaughtException', (err) => {
+  console.error('[uncaught]', err?.stack || String(err))
+})
+process.on('unhandledRejection', (err) => {
+  console.error('[unhandledRejection]', (err as Error)?.stack || String(err))
+})
+
+function createWindow(): BrowserWindow {
+  const win = new BrowserWindow({
+    width: 1320,
+    // 九卡最低要 13 行（约 1276px），默认窗口给高一点，首屏能看到三行多
+    height: 900,
+    minWidth: 1024,
+    minHeight: 680,
+    show: false,
+    backgroundColor: '#0e1116',
+    autoHideMenuBar: true,
+    title: '工作台',
+    webPreferences: {
+      preload: PRELOAD,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      spellcheck: false
+    }
+  })
+
+  win.once('ready-to-show', () => {
+    // 开机自启带 --hidden：只留托盘，不怼到脸上
+    if (!SMOKE && !HIDDEN) win.show()
+  })
+
+  // 关闭 → 最小化到托盘（M4 会加"关闭即退出"设置）
+  win.on('close', (e) => {
+    if (!SMOKE && !(app as unknown as { isQuitting?: boolean }).isQuitting) {
+      e.preventDefault()
+      win.hide()
+    }
+  })
+
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    shell.openExternal(url)
+    return { action: 'deny' }
+  })
+
+  if (SHOT) {
+    win.webContents.on('did-finish-load', () => {
+      void (async () => {
+        const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
+        await wait(1800)
+        try {
+          // WB_SHOT_NO_SKIP：要拍导览/首次流程时别自动跳过
+          if (!process.env.WB_SHOT_NO_SKIP) {
+            await win.webContents.executeJavaScript(`(() => {
+            const skip = [...document.querySelectorAll('button')].find(b => (b.textContent || '').trim() === '以后再说')
+            if (skip) skip.click()
+            return true
+          })()`)
+          }
+          // WB_SHOT_JS：截图前先点几下，拍弹层/交互态用
+          const extra = process.env.WB_SHOT_JS
+          if (extra) {
+            await wait(400)
+            try {
+              const out = await win.webContents.executeJavaScript(extra)
+              if (out) console.log('[shot] js =>', String(out))
+            } catch (err) {
+              console.error('[shot] js failed', (err as Error).message)
+            }
+          }
+        } catch {
+          /* 没有导览就直接截 */
+        }
+        await wait(1500)
+        try {
+          const img = await win.webContents.capturePage()
+          const dir = path.join(dataDir, 'logs')
+          fs.mkdirSync(dir, { recursive: true })
+          fs.writeFileSync(path.join(dir, 'shot.png'), img.toPNG())
+        } catch (err) {
+          console.error('[shot] failed', (err as Error).message)
+        }
+        app.quit()
+      })()
+    })
+  }
+
+  const devUrl = process.env.WB_DEV_URL
+  if (devUrl) {
+    void win.loadURL(devUrl)
+  } else {
+    void win.loadFile(RENDERER_INDEX)
+  }
+
+  return win
+}
+
+function registerIpc(): void {
+  ipcMain.handle('app:info', (): AppInfo => ({
+    version: app.getVersion(),
+    dataDir,
+    isPackaged: app.isPackaged,
+    platform: process.platform
+  }))
+
+  ipcMain.handle('ui:get', (): UiState => {
+    const state = uiStore.read()
+    let changed = false
+    // 兜底：新版本新增模块时补齐布局项
+    for (const item of DEFAULT_UI_STATE.layout) {
+      if (!state.layout.some((l) => l.moduleId === item.moduleId)) {
+        state.layout.push({ ...item, order: state.layout.length })
+        changed = true
+      }
+    }
+    // 卡片内容变高了，旧布局按版本号一次性抬到最小尺寸
+    if (migrateLayout(state)) changed = true
+    if (changed) uiStore.write(state)
+    return state
+  })
+
+  ipcMain.handle('ui:save', (_e, state: UiState): void => {
+    // 渲染进程不知道版本号，缺失才补；已有旧版本号要保留，否则迁移测不出来也回不去
+    if (typeof state.layoutVersion !== 'number') state.layoutVersion = LAYOUT_VERSION
+    uiStore.write(state)
+  })
+
+  ipcMain.handle('app:hide', (): void => {
+    mainWindow?.hide()
+  })
+
+  ipcMain.handle('app:quit', (): void => {
+    ;(app as unknown as { isQuitting?: boolean }).isQuitting = true
+    app.quit()
+  })
+
+  // ── 班表 ──
+  ipcMain.handle('schedule:get', (): ScheduleState => getScheduleState())
+  ipcMain.handle('schedule:save', (_e, next: ScheduleState): ScheduleState => {
+    // 没有这一层，一条非法班表（如 25:00）就能让托盘倒计时抛异常带走主进程
+    if (!next || !Array.isArray(next.profiles) || next.profiles.length === 0) {
+      throw new Error('班表至少要保留一个方案')
+    }
+    const ids = new Set<string>()
+    for (const p of next.profiles) {
+      if (!p || typeof p.id !== 'string' || p.id.length === 0) throw new Error('班表方案的 id 不合法')
+      if (ids.has(p.id)) throw new Error('班表方案 id 有重复')
+      ids.add(p.id)
+      const issues = validateProfile(p)
+      if (issues.length > 0) {
+        throw new Error((p.name || '班表') + '：' + issues[0].message)
+      }
+    }
+    if (!ids.has(next.activeId)) next.activeId = next.profiles[0].id
+    saveScheduleState(next)
+    setSettingValue('scheduleConfigured', '1')
+    // 立刻落盘并检查：只写内存不写文件，用户重启就"没了"，还以为自己没点
+    const written = persistNow()
+    if (!written.ok) {
+      throw new Error('写入磁盘失败：' + (written.error ?? '未知原因') + '（数据目录 ' + dataDir + '）')
+    }
+    const fresh = getScheduleState()
+    // 广播：所有卡片（倒计时/到岗/设置面板）立即跟着新班表重算，不用重启
+    for (const w of BrowserWindow.getAllWindows()) w.webContents.send('schedule:changed', fresh)
+    audit('schedule:save', `${fresh.profiles.length} profile(s)`)
+    return fresh
+  })
+  ipcMain.handle('schedule:presets', () => presets())
+
+  ipcMain.handle('window:fullscreen', (_e, on: boolean): void => {
+    mainWindow?.setFullScreen(on)
+  })
+  ipcMain.handle('window:isFullscreen', (): boolean => mainWindow?.isFullScreen() ?? false)
+
+  // ── 存储 / 备份 ──
+  ipcMain.handle('store:stats', () => ({
+    ...persistStats(),
+    isOpen: isOpen(),
+    file: dataFilePath(),
+    counts: tableCounts()
+  }))
+
+  ipcMain.handle('backup:create', (_e, suggested?: string) => {
+    const target = suggested || path.join(dataDir, 'backups', `wb-${new Date().toISOString().slice(0, 10)}.wbk`)
+    return { file: target, manifest: createBackup(dataDir, target, app.getVersion()) }
+  })
+
+  ipcMain.handle('backup:pick', async () => {
+    const res = await dialog.showOpenDialog(mainWindow!, {
+      title: '选择备份文件',
+      filters: [{ name: '工作台备份', extensions: ['wbk'] }],
+      properties: ['openFile']
+    })
+    return res.canceled ? null : res.filePaths[0]
+  })
+
+  ipcMain.handle('backup:restore', async (_e, file: string) => {
+    const report = restoreBackup(dataDir, file)
+    // 内存库还开着：不重开的话，下一次落盘会把刚还原的文件用旧库覆盖回去
+    const reopened = await reopenStore(dataDir)
+    return { ...report, reopened }
+  })
+  ipcMain.handle('backup:list', () => listBackups(dataDir))
+  ipcMain.handle('backup:autoNow', () => autoBackup(dataDir, app.getVersion(), 7))
+
+  ipcMain.handle('backup:exportRedacted', (_e, suggested?: string) => {
+    const target = suggested || path.join(dataDir, 'exports', `redacted-${Date.now()}.json`)
+    return { file: target, ...exportRedacted(dataDir, target) }
+  })
+
+  ipcMain.handle('datadir:migrate', (_e, targetDir: string) => {
+    if (!targetDir || path.resolve(targetDir) === path.resolve(dataDir)) {
+      throw new Error('新目录与当前目录相同')
+    }
+    const report = copyDataDir(dataDir, targetDir)
+    if (!report.verified) throw new Error('复制校验失败，已保留原目录，未切换')
+    const b = readBootstrap()
+    if (b) writeBootstrap({ ...b, dataDir: targetDir })
+    return { from: dataDir, to: targetDir, ...report, restartRequired: true }
+  })
+
+  ipcMain.handle('app:openDataDir', async () => {
+    await shell.openPath(dataDir)
+  })
+
+  // ── 待办 ──
+  ipcMain.handle('todos:list', (_e, scope: 'open' | 'today' | 'all') => listTodos(scope ?? 'open'))
+  ipcMain.handle('todos:done', (_e, limit?: number) => listDone(limit))
+  ipcMain.handle('todo:add', (_e, text: string, opts) => addTodo(text, opts))
+  ipcMain.handle('todo:complete', (_e, id: string) => completeTodo(id))
+  ipcMain.handle('todo:uncomplete', (_e, id: string) => uncompleteTodo(id))
+  ipcMain.handle('todo:update', (_e, id: string, patch: Partial<TodoRow>) => updateTodo(id, patch))
+  ipcMain.handle('todo:delete', (_e, id: string) => deleteTodo(id))
+  ipcMain.handle('todo:reorder', (_e, ids: string[]) => reorderTodos(ids))
+  ipcMain.handle('todo:autoWorklog', (_e, on: boolean) => setSettingBool('autoWorklog', on))
+
+  // ── 工作记录 ──
+  ipcMain.handle('worklog:list', (_e, day?: string) => listWorklog(day))
+  ipcMain.handle('worklog:add', (_e, text: string, kind?: string) => addWorklog(text, kind))
+  ipcMain.handle('worklog:update', (_e, id: string, text: string) => updateWorklog(id, text))
+  ipcMain.handle('worklog:days', (_e, limit?: number) => worklogDays(limit))
+  ipcMain.handle('worklog:delete', (_e, id: string) => deleteWorklog(id))
+  ipcMain.handle('worklog:summary', (_e, day?: string) => dailySummary(day))
+
+  // ── 口径库 ──
+  ipcMain.handle('knowledge:list', (_e, q?: string) => listKnowledge(q ?? ''))
+  ipcMain.handle('knowledge:add', (_e, k) => addKnowledge(k))
+  ipcMain.handle('knowledge:update', (_e, id: string, patch) => updateKnowledge(id, patch))
+  ipcMain.handle('knowledge:scopes', () => knowledgeScopes())
+  ipcMain.handle('knowledge:delete', (_e, id: string) => deleteKnowledge(id))
+
+  // ── 粘贴解析 ──
+  ipcMain.handle('paste:parse', (_e, raw: string) => parsePaste(raw))
+  ipcMain.handle('paste:apply', (_e, input) => applyPaste(input))
+
+  // ── 到岗 ──
+  ipcMain.handle('checkin:get', (_e, day?: string) => getCheckin(day ?? todayStr()))
+  ipcMain.handle('checkin:mark', (_e, day?: string, opts?: { at?: string; isBackfill?: boolean; note?: string | null }) => {
+    // 不指定日期 / 指定"今天"时按班次归属日算：跨零点夜班凌晨打卡要记到前一天
+    const target = !day || day === todayStr() ? workDayOf() : day
+    return markCheckin(target, opts ?? {})
+  })
+  ipcMain.handle('checkin:update', (_e, day: string, patch: { at?: string; note?: string | null; isBackfill?: boolean }) =>
+    updateCheckin(day, patch)
+  )
+  ipcMain.handle('checkin:undo', (_e, day?: string) => deleteCheckin(day ?? todayStr()))
+  // 批量补卡：一次最多 366 天，逐条校验日期格式，坏的跳过不炸整批
+  ipcMain.handle('checkin:markMany', (_e, days: string[], opts?: { at?: string; note?: string | null }) => {
+    if (!Array.isArray(days)) throw new Error('要补的日期必须是一个列表')
+    if (days.length > 366) throw new Error('一次最多补 366 天')
+    const clean = days.filter((d): d is string => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d))
+    if (clean.length === 0) throw new Error('没有可用的日期')
+    return markManyCheckins(clean, opts ?? {})
+  })
+  ipcMain.handle('checkin:stats', () => checkinStats())
+  ipcMain.handle('checkin:calendar', (_e, ym: string) => checkinCalendar(ym))
+  ipcMain.handle('checkin:monthSummary', (_e, ym: string) => monthSummary(ym))
+  ipcMain.handle('checkin:range', (_e, from: string, to: string) => rangeCheckins(from, to))
+  ipcMain.handle('checkin:export', (_e, ym: string, file?: string) =>
+    exportCheckins(ym, file ?? path.join(dataDir, 'exports', `checkins-${ym}.xlsx`))
+  )
+
+  // ── 设置 ──
+  ipcMain.handle('settings:get', () => getSettings())
+  ipcMain.handle('store:info', () => storeInfo())
+
+  // ── 在线更新 ──
+  ipcMain.handle('update:state', () => getUpdateState())
+  ipcMain.handle('update:check', async () => await checkForUpdate())
+  ipcMain.handle('update:download', async () => await downloadUpdate())
+  ipcMain.handle('update:apply', () => applyUpdate())
+  ipcMain.handle('settings:set', (_e, key: string, value: string) => {
+    // 保留键不许渲染进程直接写：否则一行脚本就能关锁/改锁哈希
+    if (/^lock/i.test(key) || key.startsWith('masterKey')) throw new Error('该设置项不允许直接写入')
+    settingSet(key, value)
+  })
+  // 探针：写值 → 落盘 → 关库 → 重开 → 读回，只给冒烟验证「重启后还在」用
+  ipcMain.handle('settings:persistProbe', async (_e, key: string, value: string) => {
+    if (typeof key !== 'string' || !key) throw new Error('key 不能为空')
+    if (/^lock/i.test(key) || key.startsWith('masterKey')) throw new Error('该设置项不允许直接写入')
+    settingSet(key, value)
+    persistNow()
+    const ok = await reopenStore(dataDir)
+    if (!ok) throw new Error('重开库失败')
+    return getSettings()[key] ?? ''
+  })
+
+  // ── 应用锁 ──
+  ipcMain.handle('lock:state', () => lockState())
+  ipcMain.handle('lock:setPassword', (_e, pw: string) => setPassword(pw))
+  ipcMain.handle('lock:changePassword', (_e, oldPw: string, newPw: string) => changePassword(oldPw, newPw))
+  ipcMain.handle('lock:disable', (_e, pw: string) => disableLock(pw))
+  ipcMain.handle('lock:autoMinutes', (_e, min: number) => setAutoLockMinutes(min))
+  ipcMain.handle('lock:lock', () => {
+    const s = lockNow()
+    mainWindow?.webContents.send('lock:changed', s)
+    return s
+  })
+  ipcMain.handle('lock:unlock', (_e, pw: string) => {
+    const r = unlock(pw)
+    if (r.ok) mainWindow?.webContents.send('lock:changed', r.state)
+    return r
+  })
+  ipcMain.handle('lock:issueRecovery', (_e, pw: string) => issueRecoveryCode(pw))
+  ipcMain.handle('lock:hasRecovery', () => hasRecoveryCode())
+  ipcMain.handle('lock:recoveryHint', () => recoveryHint())
+  ipcMain.handle('lock:setRecoveryHint', (_e, text: string) => setRecoveryHint(text))
+  ipcMain.handle('lock:resetByRecovery', (_e, code: string, newPw: string) => resetByRecovery(code, newPw))
+
+  // ── 系统集成 ──
+  ipcMain.handle('app:autostart', () => app.getLoginItemSettings().openAtLogin)
+  ipcMain.handle('app:setAutostart', (_e, on: boolean) => {
+    app.setLoginItemSettings({ openAtLogin: on, args: ['--hidden'] })
+    return app.getLoginItemSettings().openAtLogin
+  })
+  ipcMain.handle('app:trayTip', () => trayTip(activeProfileSafe()))
+
+  // ── 便签 / 番茄钟 / 命令面板 ──
+  ipcMain.handle('notes:list', () => listNotes())
+  ipcMain.handle('notes:add', (_e, text: string) => addNote(text))
+  ipcMain.handle('notes:update', (_e, id: string, patch) => updateNote(id, patch))
+  ipcMain.handle('notes:delete', (_e, id: string) => deleteNote(id))
+  ipcMain.handle('pomodoro:record', (_e, kind: 'focus' | 'break', minutes: number, todoId?: string) =>
+    recordPomodoro(kind, minutes, todoId ?? null)
+  )
+  ipcMain.handle('pomodoro:today', () => pomodoroToday())
+  ipcMain.handle('palette:actions', () => PALETTE_ACTIONS)
+
+  // ── 插件（声明式清单，无代码执行） ──
+  ipcMain.handle('plugins:list', () => loadPlugins(dataDir))
+  ipcMain.handle('plugins:sample', () => ({ file: writeSampleManifest(dataDir) }))
+}
+
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.show()
+    mainWindow.focus()
+  }
+})
+
+app.whenReady().then(async () => {
+  const resolved = resolveDataDirInfo()
+  dataDir = resolved.dir
+  if (resolved.warn) {
+    // 目录打不开就明说，绝不悄悄换个新目录让用户以为数据丢了
+    console.error('[dataDir]', resolved.warn)
+    void dialog.showMessageBox({
+      type: 'warning',
+      title: '数据目录打不开',
+      message: resolved.warn,
+      detail: '原来的数据还在这个目录里，接好磁盘/修好权限后重启即可。本次不会新建空库。',
+      buttons: ['知道了']
+    })
+  }
+  try {
+    await openStore(dataDir)
+  } catch (err) {
+    // 打不开就说清楚：文件在哪、怎么救。绝不静默新建空库让用户以为数据没了
+    const msg = (err as Error).message
+    console.error('[store] open failed', msg)
+    const pick = await dialog.showMessageBox({
+      type: 'error',
+      title: '数据打不开',
+      message: msg,
+      detail: '数据文件在：' + dataDir + '\n可以直接从 backups 目录里的备份恢复（文件名按日期排序）。',
+      buttons: ['打开数据目录', '退出'],
+      defaultId: 0,
+      cancelId: 1
+    })
+    if (pick.response === 0) void shell.openPath(dataDir)
+    app.quit()
+    return
+  }
+
+  // 首次启动 / 老用户自愈：
+  // 默认班表（09:00–18:00，午休 12:00–13:00）本身就是能用的，直接写进库并落盘，
+  // 这样"向导没点完"也不会导致倒计时没数据、或界面一直提示"班表还没配"。
+  try {
+    const st = getScheduleState()
+    if (st.profiles.length > 0 && getSettings().scheduleConfigured !== '1') {
+      saveScheduleState(st)
+      settingSet('scheduleConfigured', '1')
+      const r = persistNow()
+      if (!r.ok) console.error('[schedule] 默认班表落盘失败：', r.error)
+    }
+  } catch (err) {
+    console.error('[schedule] 初始化失败', (err as Error).message)
+  }
+
+  // 旧版 schedule.json 一次性导入
+  const legacyPath = path.join(dataDir, 'schedule.json')
+  if (fs.existsSync(legacyPath)) {
+    try {
+      const legacy = JSON.parse(fs.readFileSync(legacyPath, 'utf8')) as ScheduleState
+      importLegacySchedule(legacy)
+      fs.renameSync(legacyPath, legacyPath + '.imported')
+    } catch {
+      /* 导入失败不阻塞启动 */
+    }
+  }
+
+  uiStore = new JsonStore<UiState>(path.join(dataDir, 'ui.json'), () => structuredClone(DEFAULT_UI_STATE))
+  // 落盘失败 → 渲染层红条：绝不让"没写进文件"这件事悄悄发生
+  onPersistError((message) => {
+    for (const w of BrowserWindow.getAllWindows()) w.webContents.send('store:persistError', message)
+  })
+
+  // 更新状态推给界面
+  setSettingReader((key) => getSettings()[key] ?? null)
+  onUpdateState((s) => {
+    for (const w of BrowserWindow.getAllWindows()) w.webContents.send('update:state', s)
+  })
+
+  // 启动后静默检查一次（可在设置里关掉），有新版本才打扰
+  setTimeout(() => {
+    if (getSettings().updateAutoCheck === '0') return
+    void checkForUpdate().then((s) => {
+      if (!s.info) return
+      try {
+        const n = new Notification({ title: '发现新版本 ' + s.info.latest, body: '在「设置 → 更新」里下载，或稍后手动检查' })
+        n.show()
+      } catch {
+        /* 通知被系统关掉也无所谓 */
+      }
+    })
+  }, 15000)
+
+  registerIpc()
+
+  mainWindow = createWindow()
+
+  // 每日自动备份（当天已有则跳过，保留 7 份）
+  try {
+    const ab = autoBackup(dataDir, app.getVersion(), 7)
+    if (ab.created) console.log('[backup] auto created', ab.file)
+  } catch (err) {
+    console.error('[backup] auto failed', (err as Error).message)
+  }
+
+  if (!SMOKE) {
+    createTray({
+      onShow: () => {
+        mainWindow?.show()
+        mainWindow?.focus()
+      },
+      onHide: () => mainWindow?.hide(),
+      onLock: () => {
+        const s = lockNow()
+        mainWindow?.webContents.send('lock:changed', s)
+      },
+      onCheckin: () => {
+        const row = markCheckin(todayStr(), {})
+        mainWindow?.webContents.send('checkin:changed', row)
+      },
+      onSettings: () => {
+        mainWindow?.show()
+        mainWindow?.focus()
+        mainWindow?.webContents.send('open:settings', 'schedule')
+      },
+      onQuit: () => {
+        ;(app as unknown as { isQuitting?: boolean }).isQuitting = true
+        app.quit()
+      }
+    })
+
+    // 全局快捷键：离开界面也能打卡/上锁
+    try {
+      const okCheckin = globalShortcut.register('Control+Alt+K', () => {
+        try {
+          const row = markCheckin(todayStr(), {})
+          mainWindow?.webContents.send('checkin:changed', row)
+        } catch (err) {
+          console.error('[shortcut] checkin failed', (err as Error).message)
+        }
+      })
+      const okLock = globalShortcut.register('Control+Alt+L', () => {
+        const s = lockNow()
+        mainWindow?.webContents.send('lock:changed', s)
+      })
+      // register 失败只返回 false，不抛异常：静默失效是最坑的，至少记下来
+      if (!okCheckin || !okLock) {
+        const missing = [!okCheckin ? 'Ctrl+Alt+K' : '', !okLock ? 'Ctrl+Alt+L' : ''].filter(Boolean).join('、')
+        console.warn('[shortcut] 被占用：' + missing)
+      }
+    } catch (err) {
+      console.error('[shortcut] register failed', (err as Error).message)
+    }
+
+    // 托盘悬浮即见倒计时
+    const profile = activeProfileSafe()
+    if (profile) {
+      setTrayTooltip(trayTip(profile))
+      trayTimer = setInterval(() => {
+        // 定时器里抛异常会带走整个主进程，这里必须兜住
+        try {
+          const p = activeProfileSafe()
+          if (p) setTrayTooltip(trayTip(p))
+        } catch (err) {
+          console.error('[tray] tip failed', (err as Error).message)
+        }
+      }, 20_000)
+    }
+
+    const b = readBootstrap()
+    if (b) writeBootstrap({ ...b, lastOpenedAt: new Date().toISOString() })
+  }
+
+  mainWindow.webContents.on('console-message', (_e, level, message) => {
+    if (SMOKE && level >= 2) console.log('[renderer]', message)
+  })
+
+  mainWindow.webContents.on('did-finish-load', async () => {
+    if (!SMOKE) return
+    const code = await runSmoke(mainWindow!, {
+      version: app.getVersion(),
+      dataDir,
+      isPackaged: app.isPackaged,
+      platform: process.platform
+    })
+    destroyTray()
+    app.exit(code)
+  })
+})
+
+app.on('window-all-closed', () => {
+  // 托盘常驻：不自动退出（SMOKE 除外）
+  if (SMOKE) app.quit()
+})
+
+app.on('before-quit', () => {
+  ;(app as unknown as { isQuitting?: boolean }).isQuitting = true
+  try {
+    persistNow()
+    closeStore()
+  } catch {
+    /* 退出时落盘失败不阻塞退出 */
+  }
+})
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

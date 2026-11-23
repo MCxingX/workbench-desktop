@@ -1,0 +1,32 @@
+appId: com.yg.workbench
+productName: Workbench
+copyright: Copyright © 2026 YG
+
+directories:
+  output: release
+  buildResources: build
+
+files:
+  - dist/**/*
+  - package.json
+  - '!**/*.map'
+  - '!**/*.ts'
+
+asar: true
+asarUnpack:
+  - '**/node_modules/sql.js/**'
+
+compression: maximum
+removePackageScripts: true
+
+win:
+  target:
+    - target: portable
+      arch:
+        - x64
+  icon: build/icon.ico
+  requestedExecutionLevel: asInvoker
+
+portable:
+  artifactName: Workbench-${version}-portable.exe
+  unpackDirName: Workbench
