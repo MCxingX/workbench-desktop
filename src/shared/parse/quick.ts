@@ -67,7 +67,9 @@ export function parseQuickTodo(input: string, now = new Date(), anchors?: TimeAn
   const builtinPhrase = m?.[1] ?? null
   const learnedTime = learned?.time ?? null
   const dueAt = learnedTime ? learnedTime.dueAt : resolveDue(builtinPhrase, now, anchors ?? null)
-  const timeHint = learnedTime ? learnedTime.label : (findTime(raw)?.label ?? builtinPhrase)
+  // 提示优先显示用户自己写的那个词（"明天下午"就显示"明天下午"），
+  // 不能拿词表里的默认时刻冒充 —— 那会让"跟着班表走"看起来像没生效
+  const timeHint = learnedTime ? learnedTime.label : (builtinPhrase ?? findTime(raw)?.label ?? null)
 
   // ── 标题：摘掉时间词（学到的用命中片段，内置的用正则）──
   let text = learned?.text ?? raw
