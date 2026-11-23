@@ -14,11 +14,19 @@ if (!fs.existsSync(releaseDir)) {
   process.exit(1)
 }
 
+// 固定产物名：新版本覆盖同一个 exe，不再按版本号堆文件
+const FIXED = 'Workbench-portable.exe'
+
 const exe = fs
   .readdirSync(releaseDir)
   .filter((f) => f.endsWith('.exe') && f.includes('portable'))
   .map((f) => ({ f, stat: fs.statSync(path.join(releaseDir, f)) }))
-  .sort((a, b) => b.stat.mtimeMs - a.stat.mtimeMs)[0]
+  // 固定名优先，其次才按修改时间挑最新的
+  .sort((a, b) => {
+    if (a.f === FIXED) return -1
+    if (b.f === FIXED) return 1
+    return b.stat.mtimeMs - a.stat.mtimeMs
+  })[0]
 
 if (!exe) {
   console.error('release 目录里没有 portable exe')

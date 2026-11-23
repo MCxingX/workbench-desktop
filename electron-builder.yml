@@ -28,5 +28,7 @@ win:
   requestedExecutionLevel: asInvoker
 
 portable:
-  artifactName: Workbench-${version}-portable.exe
+  # 固定文件名：新版本直接覆盖同一个 exe，桌面/快捷方式不用跟着改，
+  # 版本号在应用标题和关于页里，不在文件名里
+  artifactName: Workbench-portable.exe
   unpackDirName: Workbench
