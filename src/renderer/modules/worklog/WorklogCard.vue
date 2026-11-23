@@ -59,6 +59,16 @@ async function saveEdit(r: WorklogRow): Promise<void> {
   flash('已改')
 }
 
+async function copyWeek(): Promise<void> {
+  const r = await window.wb.weekReport()
+  if (!r || !r.text) {
+    flash('本周还没有记录')
+    return
+  }
+  await navigator.clipboard.writeText(r.text)
+  flash('周报已复制，可直接粘贴')
+}
+
 async function copySummary(): Promise<void> {
   const text = await window.wb.dailySummary(day.value || undefined)
   if (!text) {
@@ -104,6 +114,7 @@ defineExpose({ load })
       <button class="nav" @click="goDay(1)">›</button>
       <span class="spacer" />
       <button class="wl-copy" @click="copySummary">复制小结</button>
+      <button class="wl-copy" @click="copyWeek">复制周报</button>
     </div>
 
     <input v-model="draft" class="wl-input" placeholder="记一句…（回车保存）" @keydown.enter.prevent="add" />

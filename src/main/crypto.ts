@@ -17,6 +17,43 @@ export function keyFilePath(): string {
 }
 
 /**
+ * 读一个密钥文件，读不出可用密钥就返回 null（不抛异常）。
+ * 兼容两种历史形态：DPAPI 包裹过的 base64，或裸 32 字节。
+ */
+export function readKeyFile(file: string): Buffer | null {
+  try {
+    if (!fs.existsSync(file)) return null
+    const wrapped = fs.readFileSync(file)
+    if (wrapped.length === KEY_BYTES) return wrapped
+    if (safeStorage.isEncryptionAvailable()) {
+      const raw = Buffer.from(safeStorage.decryptString(wrapped), 'base64')
+      return raw.length === KEY_BYTES ? raw : null
+    }
+    return wrapped.length === KEY_BYTES ? wrapped : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 候选密钥：主位置 + 数据目录里的 master.key / master.key.copy。
+ * 顺序即优先级；只要有一个能解开库就照常打开，避免"钥匙放错地方 = 数据打不开"。
+ */
+export function keyCandidates(dataDir?: string): { path: string; key: Buffer }[] {
+  const files = [keyFilePath()]
+  if (dataDir) files.push(path.join(dataDir, 'master.key'), path.join(dataDir, 'master.key.copy'))
+  const seen = new Set<string>()
+  const out: { path: string; key: Buffer }[] = []
+  for (const f of files) {
+    if (seen.has(f)) continue
+    seen.add(f)
+    const k = readKeyFile(f)
+    if (k) out.push({ path: f, key: k })
+  }
+  return out
+}
+
+/**
  * 主密钥：随机 32 字节，由系统钥匙串（Windows DPAPI / macOS Keychain）包裹后落盘。
  * 密码不参与派生 —— 忘记密码也不会丢数据（用恢复密钥或重置应用锁）。
  */

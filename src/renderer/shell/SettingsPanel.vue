@@ -5,16 +5,18 @@ import type { ShiftProfile, WeekVariant } from '@shared/schedule/model'
 import { validateProfile, variantOf, previewDays } from '@shared/schedule/resolve'
 import { addDays, mondayOf, ymd } from '@shared/schedule/time'
 import { encodeShare, decodeShare } from '@shared/schedule/share-link'
+import RulesPanel from '../modules/settings/RulesPanel.vue'
 
 const props = defineProps<{ open: boolean; tab?: string }>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'saved'): void; (e: 'theme'): void }>()
 
-type Tab = 'schedule' | 'week' | 'lock' | 'data' | 'update' | 'diag' | 'about'
+type Tab = 'schedule' | 'week' | 'lock' | 'rules' | 'data' | 'update' | 'diag' | 'about'
 const tab = ref<Tab>('schedule')
 const TABS: { id: Tab; label: string }[] = [
   { id: 'schedule', label: '班表与工时' },
   { id: 'week', label: '单双周 / 单双月' },
   { id: 'lock', label: '应用锁' },
+  { id: 'rules', label: '规则与自学' },
   { id: 'data', label: '数据与备份' },
   { id: 'update', label: '更新' },
   { id: 'diag', label: '诊断' },
@@ -45,6 +47,27 @@ const resetPw = ref('')
 const stats = ref<Awaited<ReturnType<typeof window.wb.storeStats>> | null>(null)
 const backups = ref<{ name: string; path: string; size: number; at: string }[]>([])
 const migrateTo = ref('')
+const keyPwd = ref('')
+
+async function protectKey(): Promise<void> {
+  try {
+    const r = await window.wb.recoveryProtectKey(keyPwd.value)
+    keyPwd.value = ''
+    if (r.ok) flash(r.message)
+    else fail(r.message)
+  } catch (e) {
+    fail((e as Error).message)
+  }
+}
+
+async function removePwdKey(): Promise<void> {
+  try {
+    const r = await window.wb.recoveryRemovePwdKey()
+    flash(r.message)
+  } catch (e) {
+    fail((e as Error).message)
+  }
+}
 
 // ── 单双月午休 ──
 const monthLunchOn = computed(() => !!draft.value?.monthLunch?.enabled)
@@ -663,6 +686,11 @@ const maskOf = (v: WeekVariant | null): boolean[] => (v ? v.mask : [])
           </div>
         </template>
 
+        <!-- 规则与自学 -->
+        <template v-else-if="tab === 'rules'">
+          <RulesPanel />
+        </template>
+
         <!-- 数据与备份 -->
         <template v-else-if="tab === 'data'">
           <h3>数据目录</h3>
@@ -678,6 +706,18 @@ const maskOf = (v: WeekVariant | null): boolean[] => (v ? v.mask : [])
           <p class="tip">
             迁移会把库、备份、附件、导出、日志、插件全部复制过去，校验通过后立刻切到新目录 ——
             不用重启，旧目录也不会再被写入（只留一张「已迁移到.txt」，删不删你决定）。
+          </p>
+
+          <h3>数据救援</h3>
+          <div class="row">
+            <label>密码保护密钥</label>
+            <input type="password" v-model="keyPwd" placeholder="设置一个密码（至少 4 位）" />
+            <button class="mini" @click="protectKey">生成密码副本</button>
+            <button class="mini" @click="removePwdKey">移除</button>
+          </div>
+          <p class="tip">
+            开启后会在数据目录里多一个 <code>master.key.pwd</code>：将来换电脑、%APPDATA% 丢了，
+            只要记得这个密码就能把数据解开。它和「应用锁密码」是两件事，建议设成同一个。
           </p>
           <div class="row wrap">
             <span class="stat" v-if="stats">行数 <b>{{ stats.count }}</b> · {{ Math.round(stats.sizeBytes / 1024) }}KB</span>

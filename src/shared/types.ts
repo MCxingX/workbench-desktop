@@ -83,6 +83,8 @@ export interface TodoRow {
   source: string | null
   note: string | null
   sort_order: number
+  /** 循环规则：daily / weekly:N / monthly:D，null = 一次性 */
+  repeat?: string | null
 }
 
 export interface WorklogRow {
@@ -200,6 +202,8 @@ export interface UpdateState {
   file: string | null
 }
 
+import type { LearnedRule, RuleKind } from './parse/rules'
+
 export interface WbBridge {
   info(): Promise<AppInfo>
   uiGet(): Promise<UiState>
@@ -239,6 +243,34 @@ export interface WbBridge {
   openDataDir(): Promise<void>
 
   // 待办
+  weekReport(): Promise<{ text: string; days: number }>
+  recoveryDiagnose(): Promise<{
+    scan: {
+      dataDir: string
+      db: { path: string; size: number } | null
+      dbBak: { path: string; size: number } | null
+      keyFiles: { name: string; path: string; size: number; passwordProtected: boolean }[]
+      backups: { name: string; path: string; size: number; mtime: string }[]
+    }
+    usableKey: string | null
+    canOpen: boolean
+    pwdAvailable: boolean
+    message: string
+  }>
+  recoveryAutoFix(): Promise<{ ok: boolean; message: string }>
+  recoveryUnlock(password: string): Promise<{ ok: boolean; message: string }>
+  recoveryRestore(file: string): Promise<{ ok: boolean; message: string; restored: string[] }>
+  recoveryReset(): Promise<{ ok: boolean; message: string; kept: string[] }>
+  recoveryOpenDir(): Promise<void>
+  recoveryFinish(action: 'retry' | 'quit'): Promise<void>
+  recoveryProtectKey(password: string): Promise<{ ok: boolean; message: string }>
+  recoveryRemovePwdKey(): Promise<{ ok: boolean; message: string }>
+  rulesList(kind?: RuleKind): Promise<LearnedRule[]>
+  rulesSave(input: { kind: RuleKind; pattern: string; value: string }): Promise<LearnedRule>
+  rulesToggle(id: string, enabled: boolean): Promise<void>
+  rulesDelete(id: string): Promise<void>
+  rulesStats(): Promise<{ total: number; manual: number; learned: number; topHits: number }>
+  rulesTry(text: string): Promise<{ text: string; timeHint: string | null; dueAt: string | null; category: string | null; priority: number; repeat: string | null }>
   todosList(scope: 'open' | 'today' | 'all'): Promise<TodoRow[]>
   todosDone(limit?: number): Promise<TodoRow[]>
   todoAdd(text: string, opts?: { category?: string; priority?: number; dueAt?: string; source?: string }): Promise<TodoRow>

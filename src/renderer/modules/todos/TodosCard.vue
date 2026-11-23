@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import type { TodoRow } from '@shared/types'
+import { repeatLabel } from '@shared/parse/repeat'
 
 const list = ref<TodoRow[]>([])
 const done = ref<TodoRow[]>([])
@@ -164,6 +165,7 @@ defineExpose({ load })
         />
         <span v-else class="text" @dblclick="startEdit(t)" :title="'双击修改'">{{ t.text }}</span>
         <span class="tag" v-if="t.due_at">{{ t.due_at.slice(5, 16).replace('T', ' ') }}</span>
+        <span class="tag loop" v-if="t.repeat" :title="'完成后自动生成下一轮'">{{ repeatLabel(t.repeat) }}</span>
         <span class="tag" v-if="t.category">{{ t.category }}</span>
         <button class="del" @click="remove(t)" title="删除">✕</button>
       </div>

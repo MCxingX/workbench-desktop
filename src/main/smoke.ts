@@ -2,6 +2,7 @@ import type { BrowserWindow } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
 import { loadPlugins, writeSampleManifest } from './plugins'
+import { dueSoonTodos } from './todos'
 import { readBootstrap } from './paths'
 import { listBackups, autoBackup } from './backup'
 import { run as runSql } from './store'
@@ -236,6 +237,93 @@ export async function runSmoke(win: BrowserWindow, info: AppInfo): Promise<numbe
     const dd = JSON.parse(due) as { shiftEnd: string | null; due: string | null }
     const dueHM = dd.due ? dd.due.slice(11, 16) : null
     push('待办「下午」跟着班表下班时间走', !!dd.shiftEnd && dueHM === dd.shiftEnd, `下班=${dd.shiftEnd} 待办=${dueHM}`)
+
+    // ── 循环待办：完成一条，下一条自己长出来 ──
+    const rep = await evalJs<string>(`(async () => {
+      const t = await window.wb.todoAdd("每天 写工作日报")
+      const open1 = await window.wb.todosList("open")
+      const made = open1.find(x => x.id === t.id)
+      await window.wb.todoComplete(t.id)
+      const open2 = await window.wb.todosList("open")
+      const next = open2.find(x => x.text === "写工作日报" && x.repeat === "daily")
+      const done = await window.wb.todosDone(20)
+      if (next) await window.wb.todoDelete(next.id)
+      for (const d of done.filter(x => x.text === "写工作日报")) await window.wb.todoDelete(d.id)
+      return JSON.stringify({ repeat: !!made && made.repeat === "daily", due: made ? made.due_at : null, spawned: !!next, nextDue: next ? next.due_at : null, oldGone: made ? !open2.some(x => x.id === t.id) : false })
+    })()`)
+    const rp = JSON.parse(rep) as { repeat: boolean; due: string | null; spawned: boolean; nextDue: string | null; oldGone: boolean }
+    push('循环待办按「每天」入库', rp.repeat, rp.due ?? '无期限')
+    push('完成后自动生成下一轮', rp.spawned && rp.oldGone && !!rp.nextDue, rp.nextDue ?? '')
+
+    // ── 一键周报：本周拼成可粘贴文本 ──
+    const wk = await evalJs<string>(`(async () => { const r = await window.wb.weekReport(); return JSON.stringify({ has: typeof r.text === "string" && r.text.includes("周报"), days: r.days }) })()`)
+    const wk2 = JSON.parse(wk) as { has: boolean; days: number }
+    push('一键周报能拼出可粘贴文本', wk2.has, `days=${wk2.days}`)
+
+    // ── 密钥救援副本常驻数据目录 ──
+    const info2 = JSON.parse(await evalJs<string>(`(async () => JSON.stringify(await window.wb.info()))()`)) as { dataDir: string }
+    push('数据目录里有密钥救援副本', fs.existsSync(path.join(info2.dataDir, 'master.key.copy')))
+
+    // ── 到期提醒：15 分钟窗口内会被挑出来 ──
+    const soon = await evalJs<string>(`(async () => {
+      const d = new Date(Date.now() + 10 * 60e3)
+      const p = (n) => String(n).padStart(2, "0")
+      const due = d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + "T" + p(d.getHours()) + ":" + p(d.getMinutes()) + ":00"
+      const t = await window.wb.todoAdd("马上要到期的提醒测试", { dueAt: due })
+      return JSON.stringify({ id: t.id })
+    })()`)
+    const soonId = (JSON.parse(soon) as { id: string }).id
+    const dueRows = dueSoonTodos(new Date())
+    push('待办到期前 15 分钟会被挑出来提醒', dueRows.some((r) => r.id === soonId), `窗口内 ${dueRows.length} 条`)
+
+    // ── 数据救援：诊断能认到库与可用密钥；密码副本可生成/移除 ──
+    const rcDiag = await evalJs<string>(`(async () => {
+      const d = await window.wb.recoveryDiagnose()
+      const made = await window.wb.recoveryProtectKey("smoke-pw-123")
+      const withPwd = await window.wb.recoveryDiagnose()
+      const removed = await window.wb.recoveryRemovePwdKey()
+      const after = await window.wb.recoveryDiagnose()
+      return JSON.stringify({
+        hasDb: !!d.scan.db,
+        usable: !!d.usableKey,
+        backups: d.scan.backups.length,
+        made: made.ok,
+        pwdSeen: withPwd.pwdAvailable,
+        removed: removed.ok,
+        pwdGone: !after.pwdAvailable
+      })
+    })()`)
+    const rcInfo = JSON.parse(rcDiag) as { hasDb: boolean; usable: boolean; backups: number; made: boolean; pwdSeen: boolean; removed: boolean; pwdGone: boolean }
+    push('救援诊断能认到库和可用密钥', rcInfo.hasDb && rcInfo.usable, `backups=${rcInfo.backups}`)
+    push('密码保护的密钥副本可生成、可移除', rcInfo.made && rcInfo.pwdSeen && rcInfo.removed && rcInfo.pwdGone)
+
+    // ── 规则自学：手写规则生效、改分类会自动学、学到的优先于内置 ──
+    const rl = await evalJs<string>(`(async () => {
+      const before = await window.wb.rulesTry("把报价单发给张总")
+      await window.wb.rulesSave({ kind: "category", pattern: "报价单", value: "单据" })
+      const after = await window.wb.rulesTry("把报价单发给张总")
+      const made = await window.wb.todoAdd("收工前把周报发了")
+      await window.wb.todoUpdate(made.id, { category: "报表" })
+      const learned = (await window.wb.rulesList()).filter((r) => !r.manual)
+      const stats = await window.wb.rulesStats()
+      await window.wb.rulesSave({ kind: "time", pattern: "收工前", value: "17:30" })
+      const timed = await window.wb.rulesTry("收工前把周报发了")
+      await window.wb.rulesDelete((await window.wb.rulesList({ kind: "time" }))[0].id)
+      await window.wb.todoDelete(made.id)
+      return JSON.stringify({
+        beforeCat: before.category,
+        afterCat: after.category,
+        learnedCount: learned.length,
+        statsTotal: stats.total,
+        timedAt: timed.dueAt ? timed.dueAt.slice(11, 16) : null,
+        timedText: timed.text
+      })
+    })()`)
+    const rlInfo = JSON.parse(rl) as { beforeCat: string | null; afterCat: string | null; learnedCount: number; statsTotal: number; timedAt: string | null; timedText: string }
+    push('手写规则立刻生效（报价单 → 单据）', rlInfo.beforeCat !== '单据' && rlInfo.afterCat === '单据', `before=${rlInfo.beforeCat ?? 'null'} after=${rlInfo.afterCat}`)
+    push('改分类会自动学成规则', rlInfo.learnedCount >= 1, `learned=${rlInfo.learnedCount} total=${rlInfo.statsTotal}`)
+    push('学到的时刻会让录入跟着走', rlInfo.timedAt === '17:30' && !rlInfo.timedText.includes('收工前'), `at=${rlInfo.timedAt} text=${rlInfo.timedText}`)
+    await evalJs<string>(`window.wb.todoDelete(${JSON.stringify(soonId)})`)
     push('完成待办自动写记录', todoFlow.worklogAfter === 1)
     push('今日小结可直接粘贴', todoFlow.summary.includes('完成：') && /^1\. /m.test(todoFlow.summary))
 
@@ -758,6 +846,8 @@ export async function runSmoke(win: BrowserWindow, info: AppInfo): Promise<numbe
   }
 
   process.stdout.write('WB_SMOKE_RESULT ' + JSON.stringify(result) + '\n')
+  // 打包版（GUI 子系统）stdout 拿不到，这里留一份给外部脚本读
+  ;(globalThis as unknown as { __lastSmoke?: unknown }).__lastSmoke = result
   return ok ? 0 : 1
 }
 

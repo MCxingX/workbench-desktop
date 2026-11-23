@@ -26,6 +26,8 @@ import {
   setSettingReader
 } from './update'
 import { keyFilePath } from './crypto'
+import { autoRepair, diagnose, disablePasswordKey, enablePasswordKey, resetToEmpty, restoreFromBackup, unlockWithPassword } from './recovery'
+import { deleteRule, listRules, ruleStats, saveRule, setRuleEnabled } from './rules'
 import { JsonStore } from './jsonstore'
 import { createTray, destroyTray, setTrayTooltip } from './tray'
 import { runSmoke } from './smoke'
@@ -49,6 +51,8 @@ import {
   updateWorklog,
   worklogDays,
   dailySummary,
+  dueSoonTodos,
+  weekReport,
   listKnowledge,
   addKnowledge,
   deleteKnowledge,
@@ -56,8 +60,11 @@ import {
   knowledgeScopes,
   parsePaste,
   applyPaste,
-  setSettingBool
+  setSettingBool,
+  todayAnchors,
+  parseWithRules
 } from './todos'
+import { parseQuickTodo } from '../shared/parse/quick'
 import {
   getCheckin,
   markCheckin,
@@ -90,6 +97,47 @@ const RENDERER_INDEX = path.join(__dirname, '..', '..', 'renderer', 'index.html'
 const PRELOAD = path.join(__dirname, '..', 'preload', 'index.js')
 
 let mainWindow: BrowserWindow | null = null
+let quickWin: BrowserWindow | null = null
+
+/**
+ * 全局快速记事小窗：任何软件里按 Ctrl+Alt+T 弹出，回车进库、Esc/失焦关闭。
+ * 复用主窗口的 preload，走 ?quick=1 参数让渲染层只挂快速录入组件。
+ */
+function toggleQuickCapture(): void {
+  if (quickWin && !quickWin.isDestroyed()) {
+    quickWin.show()
+    quickWin.focus()
+    return
+  }
+  quickWin = new BrowserWindow({
+    width: 560,
+    height: 132,
+    frame: false,
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    show: false,
+    backgroundColor: '#0e1116',
+    webPreferences: {
+      preload: PRELOAD,
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  })
+  quickWin.loadFile(RENDERER_INDEX, { search: 'quick=1' })
+  quickWin.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    logError('quick', new Error(`窗口加载失败 ${code} ${desc} ${url}`))
+  })
+  quickWin.once('ready-to-show', () => quickWin?.show())
+  quickWin.on('closed', () => { quickWin = null })
+  quickWin.on('blur', () => {
+    setTimeout(() => {
+      if (quickWin && !quickWin.isDestroyed() && !quickWin.isFocused()) quickWin.close()
+    }, 150)
+  })
+}
 let dataDir = ''
 let dataDirSource = '未知'
 let storeError: string | null = null
@@ -143,6 +191,77 @@ process.on('unhandledRejection', (err) => {
   console.error('[unhandledRejection]', (err as Error)?.stack || String(err))
   logError('unhandledRejection', err)
 })
+
+function buildRecoveryWindow(): BrowserWindow {
+  const w = new BrowserWindow({
+    width: 760,
+    height: 620,
+    minWidth: 640,
+    minHeight: 520,
+    title: '数据救援',
+    show: false,
+    backgroundColor: '#0e1116',
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: PRELOAD,
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  })
+  w.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    logError('recovery', new Error(`窗口加载失败 ${code} ${desc} ${url}`))
+  })
+  return w
+}
+
+/**
+ * 救援 IPC 必须早于 openStore 注册：
+ * 库打不开时 registerIpc() 还没跑到，救援窗口会调不到任何接口（表现为一直"正在检查"）。
+ */
+function registerRecoveryIpc(): void {
+  ipcMain.handle('recovery:diagnose', () => diagnose(dataDir))
+  ipcMain.handle('recovery:autoFix', () => autoRepair(dataDir))
+  ipcMain.handle('recovery:unlock', (_e, password: string) => unlockWithPassword(dataDir, password))
+  ipcMain.handle('recovery:restore', (_e, file: string) => restoreFromBackup(dataDir, file))
+  ipcMain.handle('recovery:reset', () => resetToEmpty(dataDir))
+  ipcMain.handle('recovery:openDir', () => shell.openPath(dataDir))
+  ipcMain.handle('recovery:finish', (_e, action: 'retry' | 'quit') => {
+    const r = recoveryResolve
+    recoveryResolve = null
+    recoveryWin?.close()
+    recoveryWin = null
+    r?.(action)
+  })
+  ipcMain.handle('recovery:protectKey', (_e, password: string) => enablePasswordKey(dataDir, password))
+  ipcMain.handle('recovery:removePwdKey', () => disablePasswordKey(dataDir))
+}
+
+let recoveryWin: BrowserWindow | null = null
+let recoveryResolve: ((action: 'retry' | 'quit') => void) | null = null
+
+/** 库打不开时弹出的数据救援窗口：诊断 + 自动修复 + 密码解锁 + 备份恢复 + 留档重建 */
+function openRecoveryWindow(): Promise<'retry' | 'quit'> {
+  return new Promise((resolve) => {
+    if (recoveryWin && !recoveryWin.isDestroyed()) {
+      recoveryWin.focus()
+      recoveryResolve = resolve
+      return
+    }
+    recoveryResolve = resolve
+    recoveryWin = buildRecoveryWindow()
+    recoveryWin.loadFile(RENDERER_INDEX, { search: 'recovery=1' })
+    recoveryWin.webContents.on('did-fail-load', (_e, code, desc, url) => {
+      logError('recovery', new Error(`窗口加载失败 ${code} ${desc} ${url}`))
+    })
+    recoveryWin.once('ready-to-show', () => recoveryWin?.show())
+    recoveryWin.on('closed', () => {
+      recoveryWin = null
+      const r = recoveryResolve
+      recoveryResolve = null
+      r?.('quit')
+    })
+  })
+}
 
 function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -477,12 +596,22 @@ function registerIpc(): void {
   ipcMain.handle('worklog:days', (_e, limit?: number) => worklogDays(limit))
   ipcMain.handle('worklog:delete', (_e, id: string) => deleteWorklog(id))
   ipcMain.handle('worklog:summary', (_e, day?: string) => dailySummary(day))
+  ipcMain.handle('report:week', () => weekReport())
+
 
   // ── 口径库 ──
   ipcMain.handle('knowledge:list', (_e, q?: string) => listKnowledge(q ?? ''))
   ipcMain.handle('knowledge:add', (_e, k) => addKnowledge(k))
   ipcMain.handle('knowledge:update', (_e, id: string, patch) => updateKnowledge(id, patch))
   ipcMain.handle('knowledge:scopes', () => knowledgeScopes())
+
+  // ── 学出来的规则 ──
+  ipcMain.handle('rules:list', (_e, kind?: 'category' | 'time' | 'regex') => listRules(kind))
+  ipcMain.handle('rules:save', (_e, input: { kind: 'category' | 'time' | 'regex'; pattern: string; value: string }) => saveRule(input))
+  ipcMain.handle('rules:toggle', (_e, id: string, enabled: boolean) => setRuleEnabled(id, enabled))
+  ipcMain.handle('rules:delete', (_e, id: string) => deleteRule(id))
+  ipcMain.handle('rules:stats', () => ruleStats())
+  ipcMain.handle('rules:try', (_e, text: string) => parseWithRules(text))
   ipcMain.handle('knowledge:delete', (_e, id: string) => deleteKnowledge(id))
 
   // ── 粘贴解析 ──
@@ -625,27 +754,137 @@ app.whenReady().then(async () => {
       buttons: ['知道了']
     })
   }
+  registerRecoveryIpc()
+
   try {
     await openStore(dataDir)
   } catch (err) {
-    // 打不开就说清楚：文件在哪、怎么救。绝不静默新建空库让用户以为数据没了
+    // 打不开就进救援：自动修复 / 密码解锁 / 从备份恢复 / 重建空库（留档）
+    // 绝不静默新建空库，也绝不删除任何文件
     const msg = (err as Error).message
     console.error('[store] open failed', msg)
     logError('store', err)
     storeError = msg
-    const pick = await dialog.showMessageBox({
-      type: 'error',
-      title: '数据打不开',
-      message: msg,
-      detail: '数据文件在：' + dataDir + '\n可以直接从 backups 目录里的备份恢复（文件名按日期排序）。',
-      buttons: ['打开数据目录', '退出'],
-      defaultId: 0,
-      cancelId: 1
-    })
-    if (pick.response === 0) void shell.openPath(dataDir)
-    app.quit()
-    return
+    console.warn('[store] 进入数据救援')
+
+    // 自检钩子：只在 WB_RECOVERY_SELFTEST=1 时跑，用来端到端验证救援路径（生产环境永不触发）
+    if (process.env.WB_RECOVERY_SELFTEST === 'render') {
+      const probe = buildRecoveryWindow()
+      await probe.loadFile(RENDERER_INDEX, { search: 'recovery=1' })
+      // 等诊断往返完成（渲染层 onMounted → IPC）
+      await new Promise((r) => setTimeout(r, 2500))
+      const snap = await probe.webContents.executeJavaScript(
+        `JSON.stringify({
+          buttons: [...document.querySelectorAll("button")].map((b) => b.textContent.trim()),
+          title: document.querySelector("h1")?.textContent ?? "",
+          msg: document.querySelector(".rc-msg")?.textContent ?? "",
+          chars: document.body.innerText.length
+        })`
+      )
+      console.log('WB_RECOVERY_RENDER ' + snap)
+
+      // 真实点一次「从备份恢复」：验证备份里的密钥能把库打开（不留黑箱）
+      const restored = await probe.webContents.executeJavaScript(
+        `(async () => {
+          const b = [...document.querySelectorAll("button")].find((x) => x.textContent.trim() === "从备份恢复")
+          if (!b) return JSON.stringify({ ok: false, why: "按钮找不到" })
+          b.click()
+          await new Promise((r) => setTimeout(r, 400))
+          const item = document.querySelector(".rc-item")
+          if (!item) return JSON.stringify({ ok: false, why: "备份列表没出现" })
+          item.click()
+          await new Promise((r) => setTimeout(r, 1800))
+          return JSON.stringify({ ok: true, result: document.querySelector(".rc-result")?.textContent ?? "", foot: document.querySelector(".rc-foot-btns button.primary")?.disabled })
+        })()`
+      )
+      console.log('WB_RECOVERY_RESTORE ' + restored)
+
+      // 快速记事窗：同一个 RENDERER_INDEX，确认能渲染出输入框（不是黑屏）
+      const qw = new BrowserWindow({
+        width: 560,
+        height: 132,
+        show: false,
+        frame: false,
+        webPreferences: { preload: PRELOAD, contextIsolation: true, nodeIntegration: false }
+      })
+      await qw.loadFile(RENDERER_INDEX, { search: 'quick=1' })
+      await new Promise((r) => setTimeout(r, 900))
+      const qsnap = await qw.webContents.executeJavaScript(
+        `JSON.stringify({ input: !!document.querySelector("input,textarea"), chars: document.body.innerText.length })`
+      )
+      console.log('WB_QUICK_RENDER ' + qsnap)
+      qw.destroy()
+      probe.destroy()
+      app.exit(0)
+      return
+    }
+
+    if (process.env.WB_RECOVERY_SELFTEST === '1') {
+      const d = diagnose(dataDir)
+      const r = await resetToEmpty(dataDir)
+      console.log('WB_RECOVERY_SELFTEST ' + JSON.stringify({ message: d.message, canOpen: d.canOpen, ok: r.ok, kept: r.kept, msg: r.message }))
+      app.exit(0)
+      return
+    }
+
+    let recovered = false
+    for (let round = 0; round < 4; round++) {
+      const action = await openRecoveryWindow()
+      if (action === 'quit') {
+        app.quit()
+        return
+      }
+      try {
+        await openStore(dataDir)
+        recovered = true
+        storeError = null
+        break
+      } catch (again) {
+        storeError = (again as Error).message
+        console.warn('[store] 救援后仍打不开：', storeError)
+      }
+    }
+    if (!recovered) {
+      app.quit()
+      return
+    }
   }
+
+  // 密钥救援副本：数据目录里始终留一份，%APPDATA% 出事也能凭它打开数据
+  try {
+    const kp = keyFilePath()
+    const cp = path.join(dataDir, 'master.key.copy')
+    if (fs.existsSync(kp)) {
+      const cur = fs.existsSync(cp) ? fs.readFileSync(cp) : null
+      const want = fs.readFileSync(kp)
+      if (!cur || cur.toString('hex') !== want.toString('hex')) {
+        fs.writeFileSync(cp, want)
+        logInfo('key', '已在数据目录放置密钥救援副本 master.key.copy')
+      }
+    }
+  } catch (err) {
+    console.warn('[key] 救援副本写入失败：', (err as Error).message)
+  }
+
+  // 待办到期提醒：到期前 15 分钟弹一次；只提醒将来的，过期不补弹（不制造愧疚）
+  const notifiedReminders = new Set<string>()
+  setInterval(() => {
+    try {
+      for (const t of dueSoonTodos(new Date())) {
+        const key = t.id + '|' + t.due_at
+        if (notifiedReminders.has(key)) continue
+        notifiedReminders.add(key)
+        const n = new Notification({ title: '快到点了：' + t.text, body: '到期时间 ' + t.due_at.slice(11, 16) })
+        n.on('click', () => {
+          mainWindow?.show()
+          mainWindow?.focus()
+        })
+        n.show()
+      }
+    } catch {
+      // 提醒失败不影响主流程
+    }
+  }, 60_000)
 
   // 首次启动 / 老用户自愈：
   // 默认班表（09:00–18:00，午休 12:00–13:00）本身就是能用的，直接写进库并落盘，
@@ -752,9 +991,10 @@ app.whenReady().then(async () => {
         const s = lockNow()
         mainWindow?.webContents.send('lock:changed', s)
       })
+      const okQuick = globalShortcut.register('Control+Alt+T', () => toggleQuickCapture())
       // register 失败只返回 false，不抛异常：静默失效是最坑的，至少记下来
-      if (!okCheckin || !okLock) {
-        const missing = [!okCheckin ? 'Ctrl+Alt+K' : '', !okLock ? 'Ctrl+Alt+L' : ''].filter(Boolean).join('、')
+      if (!okCheckin || !okLock || !okQuick) {
+        const missing = [!okCheckin ? 'Ctrl+Alt+K' : '', !okLock ? 'Ctrl+Alt+L' : '', !okQuick ? 'Ctrl+Alt+T' : ''].filter(Boolean).join('、')
         console.warn('[shortcut] 被占用：' + missing)
       }
     } catch (err) {
@@ -792,6 +1032,16 @@ app.whenReady().then(async () => {
       isPackaged: app.isPackaged,
       platform: process.platform
     })
+    // 打包版是 GUI 子系统，stdout 会被吞掉；
+    // 结果同时落一份文件，冒烟脚本和人都能看（隔离目录内，不碰真实数据）
+    try {
+      const out = path.join(dataDir, 'smoke-result.json')
+      const publish = (globalThis as unknown as { __lastSmoke?: unknown }).__lastSmoke
+      fs.writeFileSync(out, JSON.stringify(publish ?? { code }, null, 2), 'utf8')
+      console.log('[smoke] 结果已写入 ' + out)
+    } catch (err) {
+      console.error('[smoke] 结果落盘失败', (err as Error).message)
+    }
     destroyTray()
     app.exit(code)
   })

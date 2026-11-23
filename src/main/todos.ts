@@ -1,9 +1,11 @@
 import { query, run, transaction, audit } from './store'
 import { parseQuickTodo, type TimeAnchors } from '../shared/parse/quick'
+import { nextOccurrence, pickDueSoon } from '../shared/parse/repeat'
 import { getScheduleState } from './scheduleStore'
 import { resolveDay } from '../shared/schedule/resolve'
 import { parseChat, type ParseResult } from '../shared/parse/parser'
 import { ymd } from '../shared/schedule/time'
+import { activeRules, learnCategoryFromEdit, learnTimeFromEdit } from './rules'
 
 export interface TodoRow {
   id: string
@@ -16,6 +18,7 @@ export interface TodoRow {
   source: string | null
   note: string | null
   sort_order: number
+  repeat?: string | null
 }
 
 export interface WorklogRow {
@@ -43,6 +46,30 @@ export interface KnowledgeRow {
 const uid = (p: string): string => `${p}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
 
 /**
+ * 学到的规则 → 解析层能吃的形状。读库出错就返回 null（退化成纯内置规则）。
+ */
+function rulesHint(): { category: { pattern: string; value: string }[]; time: { pattern: string; value: string }[]; regex: { source: string; value: string }[] } | null {
+  try {
+    const rows = activeRules()
+    return {
+      category: rows.filter((r) => r.kind === 'category').map((r) => ({ pattern: r.pattern, value: r.value })),
+      time: rows.filter((r) => r.kind === 'time').map((r) => ({ pattern: r.pattern, value: r.value })),
+      regex: rows.filter((r) => r.kind === 'regex').map((r) => ({ source: r.pattern, value: r.value }))
+    }
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 带规则的解析入口：录入、快速窗、设置里「试一下」全走这里，
+ * 保证三处对同一句话给同一个结果（以前 addTodo 与 rules:try 各写一遍，就是这么走偏的）。
+ */
+export function parseWithRules(input: string, now = new Date()): ReturnType<typeof parseQuickTodo> {
+  return parseQuickTodo(input, now, todayAnchors(), rulesHint())
+}
+
+/**
  * 今天的时刻锚点来自班表：下班几点就是几点，"下午/下班前"不再写死 18:00。
  * 拿不到班表就返回 null，解析器会退回内置默认值。
  */
@@ -53,11 +80,11 @@ export function todayAnchors(): TimeAnchors | null {
     if (!p) return null
     const day = resolveDay(p, ymd(new Date()))
     const shift = day.shift ?? p.base
-    // 跨零点夜班（如 22:00–06:00）按"次日早上"理解，"下午"就落到次日收工
-    const end = shift.end <= shift.start ? shift.end : shift.end
+    // 夜班（如 22:00–06:00）的 end 早于 start：这里仍给出原始时刻，
+    // 让「下午/下班前」落到次日凌晨那一刻，而不是被错算成今天上午
     return {
       workStart: shift.start,
-      workEnd: end,
+      workEnd: shift.end,
       lunchStart: day.lunch?.start ?? null,
       lunchEnd: day.lunch?.end ?? null
     }
@@ -82,7 +109,7 @@ export function listDone(limit = 50): TodoRow[] {
 }
 
 export function addTodo(input: string, opts?: { category?: string; priority?: number; dueAt?: string; source?: string }): TodoRow {
-  const q = parseQuickTodo(input, new Date(), todayAnchors())
+  const q = parseWithRules(input)
   const row: TodoRow = {
     id: uid('td'),
     text: q.text,
@@ -96,8 +123,8 @@ export function addTodo(input: string, opts?: { category?: string; priority?: nu
     sort_order: nextOrder()
   }
   run(
-    'INSERT INTO todos (id, text, done_at, created_at, due_at, category, priority, source, note, sort_order) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)',
-    [row.id, row.text, row.created_at, row.due_at, row.category, row.priority, row.source, row.note, row.sort_order]
+    'INSERT INTO todos (id, text, done_at, created_at, due_at, category, priority, source, note, sort_order, repeat) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [row.id, row.text, row.created_at, row.due_at, row.category, row.priority, row.source, row.note, row.sort_order, q.repeat]
   )
   return row
 }
@@ -118,16 +145,58 @@ export function completeTodo(id: string): { todo: TodoRow; worklog: WorklogRow |
   if (getSettingBool('autoWorklog', true)) {
     log = addWorklog(`完成：${todo.text}`, 'done', id)
   }
+  // 循环待办：完成这条的同时，下一轮自己长出来，不用每天重新打一遍
+  if (todo.repeat) {
+    try {
+      const anchors = todayAnchors()
+      const due = nextOccurrence(todo.repeat, todo.due_at, now, anchors?.workEnd ?? '18:00')
+      if (due) {
+        run(
+          'INSERT INTO todos (id, text, done_at, created_at, due_at, category, priority, source, note, sort_order, repeat) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)',
+          [uid('td'), todo.text, now.toISOString(), due, todo.category, todo.priority, 'repeat', todo.note, nextOrder(), todo.repeat]
+        )
+        audit('todo:repeat', `${todo.text} → 下一轮 ${due.slice(0, 10)}`)
+      }
+    } catch {
+      // 下一轮生成失败不影响完成本身
+    }
+  }
   audit('todo:done', todo.text)
   return { todo: { ...todo, done_at: now.toISOString() }, worklog: log }
 }
 
 export function uncompleteTodo(id: string): void {
+  const rows = query<TodoRow>('SELECT * FROM todos WHERE id = ?', [id])
+  const todo = rows[0]
   run('UPDATE todos SET done_at = NULL WHERE id = ?', [id])
   run('DELETE FROM worklog WHERE todo_id = ? AND kind = ?', [id, 'done'])
+  // 循环待办：撤销完成时，把完成时自动生成的那条下一轮收回，避免同一条出现两份
+  if (todo?.repeat && todo.done_at) {
+    try {
+      const spawned = query<{ id: string }>(
+        'SELECT id FROM todos WHERE done_at IS NULL AND source = ? AND text = ? AND repeat = ? AND created_at >= ? ORDER BY created_at LIMIT 1',
+        ['repeat', todo.text, todo.repeat, todo.done_at]
+      )[0]
+      if (spawned) run('DELETE FROM todos WHERE id = ?', [spawned.id])
+    } catch {
+      // 收回失败不影响撤销本身
+    }
+  }
 }
 
 export function updateTodo(id: string, patch: Partial<Pick<TodoRow, 'text' | 'due_at' | 'category' | 'priority' | 'note'>>): void {
+  const before = query<TodoRow>('SELECT * FROM todos WHERE id = ?', [id])[0]
+
+  // 用户改分类 → 记住「这句话里的短语 → 分类」；改到期时间 → 记住「时间短语 → 时刻」
+  // 只在真正变了的时候学，重复点同一个值不刷学习次数
+  if (before) {
+    if ('category' in patch && patch.category && patch.category !== before.category) {
+      learnCategoryFromEdit(before.text, patch.category)
+    }
+    if ('due_at' in patch && patch.due_at && patch.due_at !== before.due_at) {
+      learnTimeFromEdit(before.text, patch.due_at)
+    }
+  }
   const fields: string[] = []
   const params: unknown[] = []
   for (const [k, v] of Object.entries(patch)) {
@@ -203,6 +272,42 @@ export function worklogDays(limit = 60): { day: string; count: number }[] {
     'SELECT day, COUNT(*) AS count FROM worklog GROUP BY day ORDER BY day DESC LIMIT ?',
     [limit]
   )
+}
+
+/** 到期前 15 分钟内的未完成待办：主进程定时器拿来弹提醒 */
+export function dueSoonTodos(now = new Date()): { id: string; text: string; due_at: string }[] {
+  return pickDueSoon(listTodos('open'), now)
+}
+
+/** 一键周报：本周到岗 + 完成待办 + 工作记录，拼成可直接粘贴的文本 */
+export function weekReport(now = new Date()): { text: string; days: number } {
+  const p = (n: number): string => String(n).padStart(2, '0')
+  const dstr = (d: Date): string => `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+  const end = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const start = new Date(end)
+  start.setDate(end.getDate() - ((end.getDay() + 6) % 7))
+  const wd = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
+  const lines: string[] = []
+  let totalTodos = 0
+  let totalLogs = 0
+  let days = 0
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(start)
+    d.setDate(start.getDate() + i)
+    const key = dstr(d)
+    const ck = query<{ marked_at: string | null }>('SELECT marked_at FROM checkins WHERE day = ?', [key])[0]
+    const todos = query<{ text: string }>('SELECT text FROM todos WHERE done_at IS NOT NULL AND substr(done_at, 1, 10) = ? ORDER BY done_at', [key])
+    const logs = query<{ text: string }>('SELECT text FROM worklog WHERE day = ? ORDER BY at', [key])
+    if (!ck && todos.length === 0 && logs.length === 0) continue
+    days++
+    const go = ck?.marked_at ? (ck.marked_at.includes('T') ? ck.marked_at.slice(11, 16) : ck.marked_at.slice(0, 5)) : ''
+    lines.push(`■ ${key.slice(5)} ${wd[i]}${go ? ` · 到岗 ${go}` : ''}`)
+    if (todos.length) { totalTodos += todos.length; lines.push('  完成：' + todos.map((t) => t.text).join('、')) }
+    if (logs.length) { totalLogs += logs.length; lines.push('  记录：' + logs.map((t) => t.text).join('；')) }
+  }
+  const head = `【周报】${dstr(start).slice(5)} ~ ${dstr(end).slice(5)}`
+  lines.push(`合计：完成待办 ${totalTodos} 条 · 工作记录 ${totalLogs} 条 · 有记录 ${days} 天`)
+  return { text: head + '\n' + lines.join('\n'), days }
 }
 
 /** 复制今日小结：有序列表，可直接粘给领导 */

@@ -1,7 +1,8 @@
 import initSqlJs, { type Database, type SqlJsStatic } from 'sql.js'
 import fs from 'node:fs'
 import path from 'node:path'
-import { getMasterKey, encryptBuffer, decryptBuffer, sha256 } from './crypto'
+import { getMasterKey, keyFilePath, keyCandidates, encryptBuffer, decryptBuffer, sha256 } from './crypto'
+import { runMigrations } from '../shared/db/migrations'
 
 const DB_FILE = 'workbench.db.enc'
 
@@ -13,115 +14,6 @@ let dirty = false
 let persistTimer: NodeJS.Timeout | null = null
 let persistCount = 0
 
-/** schema 版本化迁移，只增不改（对照 docs/04） */
-const MIGRATIONS: { version: number; sql: string }[] = [
-  {
-    version: 1,
-    sql: `
-      CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT
-      );
-
-      CREATE TABLE IF NOT EXISTS shift_profiles (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        json TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS checkins (
-        day TEXT PRIMARY KEY,
-        marked_at TEXT,
-        is_backfill INTEGER NOT NULL DEFAULT 0,
-        note TEXT
-      );
-
-      CREATE TABLE IF NOT EXISTS todos (
-        id TEXT PRIMARY KEY,
-        text TEXT NOT NULL,
-        done_at TEXT,
-        created_at TEXT NOT NULL,
-        due_at TEXT,
-        category TEXT,
-        priority INTEGER,
-        source TEXT,
-        note TEXT,
-        sort_order INTEGER NOT NULL DEFAULT 0
-      );
-      CREATE INDEX IF NOT EXISTS ix_todos_done ON todos(done_at);
-      CREATE INDEX IF NOT EXISTS ix_todos_order ON todos(sort_order);
-
-      CREATE TABLE IF NOT EXISTS worklog (
-        id TEXT PRIMARY KEY,
-        day TEXT NOT NULL,
-        at TEXT NOT NULL,
-        text TEXT NOT NULL,
-        kind TEXT NOT NULL DEFAULT 'note',
-        todo_id TEXT,
-        created_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS ix_worklog_day ON worklog(day, at);
-
-      CREATE TABLE IF NOT EXISTS knowledge_entries (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        conclusion TEXT NOT NULL,
-        scope TEXT,
-        source_text TEXT,
-        day TEXT,
-        tags TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS paste_jobs (
-        id TEXT PRIMARY KEY,
-        raw_text TEXT NOT NULL,
-        result_json TEXT,
-        accepted INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS audit_log (
-        id TEXT PRIMARY KEY,
-        at TEXT NOT NULL,
-        kind TEXT NOT NULL,
-        detail TEXT
-      );
-    `
-  },
-  {
-    version: 2,
-    sql: `
-      CREATE TABLE IF NOT EXISTS notes (
-        id TEXT PRIMARY KEY,
-        text TEXT NOT NULL,
-        pinned INTEGER NOT NULL DEFAULT 0,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS pomodoros (
-        id TEXT PRIMARY KEY,
-        kind TEXT NOT NULL,
-        minutes INTEGER NOT NULL,
-        started_at TEXT NOT NULL,
-        ended_at TEXT,
-        todo_id TEXT
-      );
-      CREATE INDEX IF NOT EXISTS ix_pomodoro_day ON pomodoros(started_at);
-
-      CREATE TABLE IF NOT EXISTS clipboard_log (
-        id TEXT PRIMARY KEY,
-        text TEXT NOT NULL,
-        at TEXT NOT NULL,
-        pinned INTEGER NOT NULL DEFAULT 0
-      );
-    `
-  }
-]
-
 function resolveWasm(): string {
   const resolved = require.resolve('sql.js/dist/sql-wasm.wasm')
   return resolved.includes('app.asar') ? resolved.replace('app.asar', 'app.asar.unpacked') : resolved
@@ -130,24 +22,73 @@ function resolveWasm(): string {
 export async function openStore(dataDir: string): Promise<void> {
   if (db) return
   SQL = await initSqlJs({ locateFile: () => resolveWasm() })
-  key = getMasterKey()
   dbPath = path.join(dataDir, DB_FILE)
+
+  // 密钥可能有三处：主位置（%APPDATA%）/ 数据目录 master.key / master.key.copy
+  // 只要有一个能解开就用它 —— 钥匙放错地方不该等于数据打不开
+  const candidates = keyCandidates(dataDir)
 
   if (fs.existsSync(dbPath)) {
     const payload = fs.readFileSync(dbPath)
-    try {
-      db = new SQL.Database(new Uint8Array(decryptBuffer(payload, key)))
-    } catch (err) {
-      const bak = dbPath + '.bak'
-      if (fs.existsSync(bak)) {
-        const backup = fs.readFileSync(bak)
-        db = new SQL.Database(new Uint8Array(decryptBuffer(backup, key)))
-        audit('db:fallback-bak', '主文件损坏，已回退 .bak')
-      } else {
-        throw new Error(`数据文件解密失败：${(err as Error).message}`)
+    const bakPath = dbPath + '.bak'
+    const backup = fs.existsSync(bakPath) ? fs.readFileSync(bakPath) : null
+
+    if (candidates.length === 0) {
+      throw new Error('数据文件解密失败：找不到任何主密钥（检查 %APPDATA%\\Workbench\\master.key、数据目录里的 master.key / master.key.copy）')
+    }
+
+    const lib = SQL
+    const open = (buf: Buffer, k: Buffer): Database => new lib.Database(new Uint8Array(decryptBuffer(buf, k)))
+    let opened: Database | null = null
+    let usedPath = ''
+    let usedKey: Buffer | null = null
+    let fromBak = false
+
+    for (const c of candidates) {
+      try {
+        opened = open(payload, c.key)
+        usedPath = c.path
+        usedKey = c.key
+        break
+      } catch {
+        // 换下一个候选
+      }
+    }
+    if (!opened && backup) {
+      for (const c of candidates) {
+        try {
+          opened = open(backup, c.key)
+          usedPath = c.path
+          usedKey = c.key
+          fromBak = true
+          break
+        } catch {
+          // 换下一个候选
+        }
+      }
+    }
+
+    if (!opened || !usedKey) {
+      throw new Error('数据文件解密失败：所有候选主密钥都不匹配（数据可能被别的机器/用户加密过，请用 backups 里的备份恢复）')
+    }
+
+    db = opened
+    key = usedKey
+    if (fromBak) audit('db:fallback-bak', '主文件损坏，已回退 .bak')
+
+    // 用的是备用位置的钥匙：把它写回主位置，下次就不用再找
+    const primary = keyFilePath()
+    if (usedPath !== primary) {
+      try {
+        fs.mkdirSync(path.dirname(primary), { recursive: true })
+        fs.copyFileSync(usedPath, primary)
+        audit('db:key-rescued', `已用备用密钥打开，并写回 ${primary}`)
+      } catch {
+        // 写不进去也不影响本次打开
       }
     }
   } else {
+    key = candidates[0]?.key ?? getMasterKey()
     db = new SQL.Database()
   }
 
@@ -157,22 +98,14 @@ export async function openStore(dataDir: string): Promise<void> {
 
 function migrate(): void {
   if (!db) throw new Error('数据库未打开')
-  db.run('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
-  const rows = query<{ version: number }>('SELECT version FROM schema_migrations')
-  const applied = new Set(rows.map((r) => r.version))
-  for (const m of MIGRATIONS) {
-    if (applied.has(m.version)) continue
-    db.run('BEGIN')
-    try {
-      db.exec(m.sql)
-      db.run('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)', [m.version, new Date().toISOString()])
-      db.run('COMMIT')
-      audit('db:migrate', `升级到 v${m.version}`)
-    } catch (err) {
-      db.run('ROLLBACK')
-      throw new Error(`迁移 v${m.version} 失败：${(err as Error).message}`)
+  // 幂等迁移：加列前查列、登记用 INSERT OR REPLACE、可选迁移失败不炸库
+  runMigrations(db, {
+    onApplied: (m) => audit('db:migrate', `升级到 v${m.version}（${m.name}）`),
+    onOptionalFail: (m, err) => {
+      console.warn(`[db] 可选迁移 v${m.version} 跳过：${err.message}`)
+      audit('db:migrate-skip', `v${m.version} ${m.name}：${err.message}`)
     }
-  }
+  })
 }
 
 export function isOpen(): boolean {
@@ -183,11 +116,35 @@ export function dataFilePath(): string {
   return dbPath
 }
 
+/**
+ * sql.js 只认 string / number / null / Uint8Array。
+ * IPC 传过来的 undefined、对象、布尔会直接抛 "tried to bind a value of an unknown type"，
+ * 所以在绑定前统一收窄 —— 这类错误以前烧过一次，别再让它从 IPC 边界漏进来。
+ */
+function sanitize(params?: unknown[]): unknown[] | undefined {
+  if (!params || params.length === 0) return undefined
+  return params.map((v) => {
+    if (v === undefined) return null
+    if (v === null) return null
+    if (typeof v === 'string' || typeof v === 'number') return v
+    if (typeof v === 'boolean') return v ? 1 : 0
+    if (v instanceof Uint8Array) return v
+    if (v instanceof Buffer) return new Uint8Array(v)
+    // 对象/数组：宁可存成 JSON 也不让绑定炸掉
+    try {
+      return JSON.stringify(v)
+    } catch {
+      return String(v)
+    }
+  })
+}
+
 export function query<T = Record<string, unknown>>(sql: string, params?: unknown[]): T[] {
   if (!db) throw new Error('数据库未打开')
   const stmt = db.prepare(sql)
   try {
-    if (params && params.length > 0) stmt.bind(params)
+    const clean = sanitize(params)
+    if (clean) stmt.bind(clean)
     const out: T[] = []
     while (stmt.step()) out.push(stmt.getAsObject() as T)
     return out
@@ -198,7 +155,7 @@ export function query<T = Record<string, unknown>>(sql: string, params?: unknown
 
 export function run(sql: string, params?: unknown[]): void {
   if (!db) throw new Error('数据库未打开')
-  db.run(sql, params)
+  db.run(sql, sanitize(params))
   markDirty()
 }
 
