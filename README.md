@@ -69,7 +69,7 @@ git push origin v1.0.1
 ]
 ```
 
-仓库地址默认 `YG/workbench-desktop`，可用设置项 `updateRepo`（`owner/repo`）覆盖。
+仓库地址默认 `MCxingX/workbench-desktop`，可用设置项 `updateRepo`（`owner/repo`）覆盖。
 
 界面入口：`Ctrl+,` → **更新** 页签，能看到每个节点的握手延迟、下载速度、进度条，以及「检查更新 / 下载更新 / 重启并安装」。
 

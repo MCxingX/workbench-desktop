@@ -7,7 +7,7 @@
   "private": true,
   "repository": {
     "type": "git",
-    "url": "https://github.com/YG/workbench-desktop.git"
+    "url": "https://github.com/MCxingX/workbench-desktop.git"
   },
   "main": "dist/node/main/index.js",
   "scripts": {

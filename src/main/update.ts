@@ -70,7 +70,7 @@ export interface UpdateState {
   file: string | null
 }
 
-const DEFAULT_REPO = 'YG/workbench-desktop'
+const DEFAULT_REPO = 'MCxingX/workbench-desktop'
 
 function repoSlug(): string {
   try {
