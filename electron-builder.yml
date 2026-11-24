@@ -11,16 +11,37 @@ files:
   - package.json
   - '!**/*.map'
   - '!**/*.ts'
+  # sql.js 只用到 sql-wasm.wasm + sql-wasm.js，其余 20 多 MB 是 asm.js 变体和调试版，
+  # 被打进包只会让 portable 每次启动多解压一堆没用的文件（启动变慢、CPU 拉满）
+  - '!**/node_modules/sql.js/dist/sqljs-all.zip'
+  - '!**/node_modules/sql.js/dist/sql-asm*'
+  - '!**/node_modules/sql.js/dist/worker*'
+  - '!**/node_modules/sql.js/dist/sql-wasm-inline*'
+  - '!**/node_modules/sql.js/dist/*-debug.*'
+  - '!**/node_modules/sql.js/dist/sql-wasm-browser*'
+  - '!**/node_modules/sql.js/**/*.md'
+  - '!**/node_modules/sql.js/**/*.ts'
 
 asar: true
 asarUnpack:
-  - '**/node_modules/sql.js/**'
+  # 只解包真正要用的两个文件。原先是整包 sql.js/**（30MB），
+  # portable 每次启动都要把它们解到 %TEMP%，白白多花时间和 CPU
+  - '**/node_modules/sql.js/dist/sql-wasm.wasm'
+  - '**/node_modules/sql.js/dist/sql-wasm.js'
 
-compression: maximum
+# 实测（同机同会话，各测三次）：
+#   store   → 启动 4.5s / 9.4s / 4.5s，exe 286MB   ← 采用
+#   normal  → 启动 8.8s / 12.5s / 12.2s，exe 72.7MB
+#   maximum → 更慢（原配置），解压时单核跑到 141%
+# portable 每次启动都要把包解到 %TEMP%，压缩率越高解压越慢、CPU 越满。
+# 本地工具多占几百 MB 硬盘，换每次启动省 4-8 秒、不占满 CPU，是划算的。
+compression: store
 removePackageScripts: true
 
 win:
   target:
+    # portable：单个 exe，双击即用，但每次启动都要把包解压到 %TEMP%（约 9-12 秒、单核满载一次）
+    # dir：免解压版（文件夹形式），启动 4-5 秒，适合固定在自己电脑上长期用
     - target: portable
       arch:
         - x64

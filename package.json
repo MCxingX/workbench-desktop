@@ -1,6 +1,6 @@
 {
   "name": "workbench",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "本地优先个人工作台（倒计时 / 到岗 / 待办 / 今日记录）",
   "author": "YG",
   "license": "MIT",
