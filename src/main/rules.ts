@@ -50,7 +50,7 @@ export function saveRule(input: RuleInput): LearnedRule {
   if (input.kind === 'regex') {
     // 坏正则当场拒绝，不要存进去以后再炸
     // eslint-disable-next-line no-new
-    new RegExp(input.kind === 'regex' ? pattern : pattern, 'u')
+    new RegExp(pattern, 'u')
   }
 
   const exist = query<LearnedRule>('SELECT * FROM learned_rules WHERE kind = ? AND pattern = ?', [input.kind, pattern])[0]

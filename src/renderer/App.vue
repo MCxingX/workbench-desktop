@@ -96,7 +96,7 @@ async function boot(): Promise<void> {
   info.value = await window.wb.info()
   applyTheme(state.value.theme)
   window.wb.onLockChanged((s) => (lock.value = s))
-  window.wb.onOpenSettings((tab) => openSettings(tab || 'week'))
+  window.wb.onOpenSettings((tab) => openSettings(tab || 'schedule'))
   const ls = await window.wb.lockState()
   lock.value = ls.locked || !ls.enabled ? ls : await window.wb.lockNow()
   const settings = await window.wb.settingsGet()

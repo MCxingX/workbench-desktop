@@ -15,6 +15,10 @@ if (!fs.existsSync(releaseDir)) {
 }
 
 // 固定产物名：新版本覆盖同一个 exe，不再按版本号堆文件
+// manifest.asset 必须指向 portable exe，不能指向 zip 绿色版：
+// applyUpdate 把下载的文件 move 覆盖 process.execPath（正在运行的 exe）。
+// zip 版运行时 execPath 是解压目录里的 Workbench.exe，拿 zip 覆盖它会直接废掉。
+// zip 绿色版只作为 GitHub Release 里的手动下载件上传，不参与自动更新。
 const FIXED = 'Workbench-portable.exe'
 
 const exe = fs
