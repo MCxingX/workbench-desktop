@@ -26,6 +26,7 @@ import {
   setSettingReader
 } from './update'
 import { keyFilePath } from './crypto'
+import { acquireLaunchLock, cleanOldUnpackDirs, releaseLaunchLock } from './single-instance'
 import { autoRepair, diagnose, disablePasswordKey, enablePasswordKey, resetToEmpty, restoreFromBackup, unlockWithPassword } from './recovery'
 import { deleteRule, listRules, ruleStats, saveRule, setRuleEnabled } from './rules'
 import { JsonStore } from './jsonstore'
@@ -175,12 +176,24 @@ function trayTip(profile: ReturnType<typeof activeProfileSafe>): string {
   }
 }
 
+// 单实例：拦在解压/开库之前，否则两个进程各写一份加密库 → 后写覆盖先写
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
-  // 必须硬退出：否则 whenReady 仍会 openStore，两个进程各写一份加密库 → 后写覆盖先写
+  // 第二个实例：Electron 会在已有实例里触发 second-instance 把窗口顶到前面，
+  // 自己立刻退出——不建库、不写盘、不做任何改动
   app.quit()
-  process.exit(0)
+  setTimeout(() => process.exit(0), 50)
 }
+
+// 启动器级互斥：portable 的解压发生在应用代码之前，上面那把锁管不到。
+// 连点几下会多个启动器同时往同一个 %TEMP% 目录解压 → app.asar 残缺 → ENOENT package.json。
+// 没拿到锁就安静退出（用户看到的仍是那一个已经在跑的窗口）。
+const launchLock = gotLock ? acquireLaunchLock() : null
+if (launchLock && !launchLock.acquired) {
+  app.quit()
+  setTimeout(() => process.exit(0), 50)
+}
+app.on('will-quit', () => releaseLaunchLock(launchLock))
 
 // 兜底：漏网异常只记日志，不让主进程带着未落盘数据崩掉
 process.on('uncaughtException', (err) => {
@@ -720,10 +733,16 @@ function registerIpc(): void {
 }
 
 app.on('second-instance', () => {
-  if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore()
-    mainWindow.show()
-    mainWindow.focus()
+  // 用户又点了一下 exe：把已经在跑的窗口顶到前面，别让他以为没反应而继续乱点
+  //（portable 每点一次都会解压一遍，乱点正是 app.asar 被写坏的来源）
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  if (!mainWindow.isVisible()) mainWindow.show()
+  mainWindow.focus()
+  try {
+    mainWindow.flashFrame(true)
+  } catch {
+    /* 闪烁提示失败不影响把窗口顶前 */
   }
 })
 
@@ -735,6 +754,16 @@ app.whenReady().then(async () => {
   // 日志先就位：后面任何一步炸了都要留下痕迹
   if (process.env.WB_DATA_DIR?.trim()) setLogDirForTest(require('node:path').join(process.env.WB_DATA_DIR.trim(), 'logs'))
   logInfo('app', `启动 v${app.getVersion()} packaged=${app.isPackaged} pid=${process.pid}`)
+  // 顺便清掉旧版本留在 %TEMP% 里的解压目录（只清 Workbench-x.y.z 形状、且没被占用的）。
+  // 不清的话，别人机器上会越积越多，而且旧目录正是 ENOENT package.json 的来源之一。
+  if (app.isPackaged) {
+    try {
+      const gone = cleanOldUnpackDirs(app.getVersion())
+      if (gone.length) logInfo('app', `已清理旧解压目录 ${gone.length} 个：${gone.join(' , ')}`)
+    } catch (err) {
+      logInfo('app', `清理旧解压目录跳过：${(err as Error).message}`)
+    }
+  }
   pruneLogs()
 
   const resolved = resolveDataDirInfo()

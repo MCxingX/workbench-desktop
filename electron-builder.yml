@@ -31,4 +31,9 @@ portable:
   # 固定文件名：新版本直接覆盖同一个 exe，桌面/快捷方式不用跟着改，
   # 版本号在应用标题和关于页里，不在文件名里
   artifactName: Workbench-portable.exe
-  unpackDirName: Workbench
+  # 解压目录必须带版本号。原来固定叫 Workbench 会出两个真问题：
+  #  1) 别人机器上留着旧版本解出的 %TEMP%\Workbench，新 exe 往同一个目录解压，
+  #     旧 app.asar 被占用/没解全 → 一点按钮就报 ENOENT …\package.json
+  #  2) 连点两下时两个启动器同时往同一目录解压，文件互相覆盖 → 解出的包是残缺的
+  # 带版本号后新版本永远解到自己的目录；旧目录由启动清理负责删（见 cleanOldUnpackDirs）。
+  unpackDirName: Workbench-${version}

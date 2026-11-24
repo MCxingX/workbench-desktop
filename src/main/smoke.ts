@@ -1,5 +1,6 @@
 import type { BrowserWindow } from 'electron'
 import fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import { loadPlugins, writeSampleManifest } from './plugins'
 import { dueSoonTodos } from './todos'
@@ -83,7 +84,10 @@ export async function runSmoke(win: BrowserWindow, info: AppInfo): Promise<numbe
 
     // ── 铁律：冒烟只写临时目录，绝不碰用户真实数据 ──
     const smokeInfo = await evalJs<{ file: string }>(`window.wb.storeInfo()`)
-    const inTemp = smokeInfo.file.toLowerCase().includes('workbench-smoke')
+    // 判"在系统临时目录里"，不是判"路径里有 smoke 这个词" ——
+    // 后者会让任何自定义命名（wb-vtest、Workbench-smoke-pkg2…）都误报失败
+    const tmpRoot = os.tmpdir().toLowerCase().replace(/\\+$/, '')
+    const inTemp = smokeInfo.file.toLowerCase().startsWith(tmpRoot + '\\') || smokeInfo.file.toLowerCase().startsWith(tmpRoot + '/')
     push('冒烟跑在隔离目录（不碰真实数据）', inTemp, smokeInfo.file)
 
     // ── M1：班表引擎接入 ──
