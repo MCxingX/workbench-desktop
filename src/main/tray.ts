@@ -1,4 +1,4 @@
-import { nativeImage, Tray, Menu, app, BrowserWindow } from 'electron'
+import { nativeImage, Tray, Menu, BrowserWindow } from 'electron'
 
 /** 生成 16x16 托盘位图（BGRA，premultiplied），免外部资源依赖 */
 function makeTrayImage(): Electron.NativeImage {
@@ -94,5 +94,3 @@ export function destroyTray(): void {
   tray?.destroy()
   tray = null
 }
-
-export { app }

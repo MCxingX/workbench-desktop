@@ -6,8 +6,6 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { compareVersion } from '../shared/version'
 
-export { compareVersion }
-
 /**
  * 绿色版（portable）在线更新。
  *

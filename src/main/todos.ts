@@ -205,7 +205,6 @@ export function updateTodo(id: string, patch: Partial<Pick<TodoRow, 'text' | 'du
   }
   if (fields.length === 0) return
   params.push(id)
-  if (fields.length === 0) return
   run(`UPDATE todos SET ${fields.join(', ')} WHERE id = ?`, params)
 }
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 
 const props = defineProps<{ open: boolean }>()
 const emit = defineEmits<{ (e: 'close'): void; (e: 'action', id: string): void }>()
@@ -46,7 +46,6 @@ watch(
 )
 
 watch(q, () => (idx.value = 0))
-onMounted(load)
 </script>
 
 <template>

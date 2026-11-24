@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, shell, dialog, globalShortcut , Notification } from 'electron'
+import { app, BrowserWindow, ipcMain, shell, dialog, globalShortcut, Notification } from 'electron'
 import fs from 'node:fs'
 import path from 'node:path'
 import { resolveDataDirInfo, readBootstrap, writeBootstrap } from './paths'

@@ -190,7 +190,6 @@ export function audit(kind: string, detail?: string): void {
   markDirty()
 }
 
-let lastGoodBytes: Buffer | null = null
 let lastPersistError: string | null = null
 let persistErrorHandler: ((message: string) => void) | null = null
 
@@ -229,19 +228,25 @@ function markDirty(): void {
   }, 300)
 }
 
-/** 落盘：export → 加密 → tmp → rename（保留上一版为 .bak） */
+/** 落盘：export → 加密 → 先备份上一版 → tmp → rename（保留上一版为 .bak） */
 export function persistNow(): { ok: boolean; error?: string } {
   if (!db || !key || !dbPath) return { ok: false, error: '库未打开' }
   try {
     const bytes = Buffer.from(db.export())
     const payload = encryptBuffer(bytes, key)
     const tmp = dbPath + '.tmp'
+    // 先把磁盘上当前这份（上一次成功落盘的库）推到 .bak：这是真正能回退的那一版。
+    // 顺序不能反——先写 tmp 后备份的话，rename 已经换主文件，再备份读到的就是刚写的；
+    // 主文件损坏时我们靠"上一次成功的那版"兜底，而不是靠再复制一遍坏文件。
+    if (fs.existsSync(dbPath)) {
+      try {
+        fs.copyFileSync(dbPath, dbPath + '.bak')
+      } catch {
+        /* .bak 写不动不影响本次落盘 */
+      }
+    }
     fs.writeFileSync(tmp, payload)
-    // .bak 用"上一次成功落盘的字节"，绝不再读磁盘当前文件：
-    // 否则主文件已损坏时会把坏文件写进 .bak，把唯一能回退的副本也毁掉
-    if (lastGoodBytes) fs.writeFileSync(dbPath + '.bak', lastGoodBytes)
     fs.renameSync(tmp, dbPath)
-    lastGoodBytes = payload
     dirty = false
     persistCount++
     lastPersistError = null
@@ -288,7 +293,6 @@ export function closeStore(): void {
 export async function reopenStore(dataDir: string): Promise<boolean> {
   try {
     closeStore()
-    lastGoodBytes = null
     await openStore(dataDir)
     return true
   } catch (err) {
