@@ -513,6 +513,17 @@ export async function runSmoke(win: BrowserWindow, info: AppInfo): Promise<numbe
     const bootAfter = JSON.stringify(readBootstrap())
     push('迁移测试没有改动真实引导文件', bootBefore === bootAfter, bootAfter)
 
+    // ── 临时目录（C 盘空间）──
+    // portable 的解压目录落在系统临时目录里，被强杀会留下 570MB 的 nsXXXX.tmp。
+    // 这里只验"能读到现在用哪个临时目录、能给出建议位置"，不做真实搬移（那是用户手动点的）。
+    const tmpNow = await evalJs<{ current: string; drive: string; isMoved: boolean; suggest: string }>(
+      `window.wb.tmpInfo().then(r => ({ current: r.current, drive: r.drive, isMoved: r.isMoved, suggest: r.suggest || '' }))`
+    )
+    push('能读出当前临时目录与所在盘', !!tmpNow.current && /^[A-Za-z]:$/.test(tmpNow.drive), `${tmpNow.drive} ${tmpNow.current}`)
+    push('能给出一条非 C 盘的迁移建议', !!tmpNow.suggest && !/^C:/i.test(tmpNow.suggest), `suggest=${tmpNow.suggest}`)
+    const swept = await evalJs<{ dirs: number; freedMB: number }>(`window.wb.tmpSweep().then(r => ({ dirs: r.dirs, freedMB: r.freedMB }))`)
+    push('清理残留的调用不会报错', typeof swept.dirs === 'number' && typeof swept.freedMB === 'number', `dirs=${swept.dirs} freedMB=${swept.freedMB}`)
+
     // ── 单双月午休：单月 12:00-13:30 / 双月 12:00-13:00 ──
     const ml = await evalJs<string>(`(async () => {
       const st = await window.wb.scheduleGet()

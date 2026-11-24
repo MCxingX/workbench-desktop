@@ -26,7 +26,8 @@ import {
   setSettingReader
 } from './update'
 import { keyFilePath } from './crypto'
-import { acquireLaunchLock, cleanOldUnpackDirs, releaseLaunchLock } from './single-instance'
+import { acquireLaunchLock, cleanOldUnpackDirs, releaseLaunchLock, sweepNsisLeftovers } from './single-instance'
+import { moveTmpDir, suggestTmpDir, sweepNow, tmpDirInfo } from './tmpdir'
 import { autoRepair, diagnose, disablePasswordKey, enablePasswordKey, resetToEmpty, restoreFromBackup, unlockWithPassword } from './recovery'
 import { deleteRule, listRules, ruleStats, saveRule, setRuleEnabled } from './rules'
 import { JsonStore } from './jsonstore'
@@ -667,6 +668,11 @@ function registerIpc(): void {
   ipcMain.handle('update:check', async () => await checkForUpdate())
   ipcMain.handle('update:download', async () => await downloadUpdate())
   ipcMain.handle('update:apply', () => applyUpdate())
+
+  // ── 临时目录（C 盘空间）──
+  ipcMain.handle('tmp:info', () => ({ ...tmpDirInfo(), suggest: suggestTmpDir() }))
+  ipcMain.handle('tmp:move', (_e, target: string) => moveTmpDir(String(target || suggestTmpDir())))
+  ipcMain.handle('tmp:sweep', () => sweepNow())
   ipcMain.handle('settings:set', (_e, key: string, value: string) => {
     // 保留键不许渲染进程直接写：否则一行脚本就能关锁/改锁哈希
     if (/^lock/i.test(key) || key.startsWith('masterKey')) throw new Error('该设置项不允许直接写入')
@@ -762,6 +768,16 @@ app.whenReady().then(async () => {
       if (gone.length) logInfo('app', `已清理旧解压目录 ${gone.length} 个：${gone.join(' , ')}`)
     } catch (err) {
       logInfo('app', `清理旧解压目录跳过：${(err as Error).message}`)
+    }
+    // NSIS 的 $PLUGINSDIR 残留（nsXXXX.tmp，每个约 572MB）：正常退出 NSIS 自己会删，
+    // 被强杀就留下。这是把 C 盘塞满的头号来源，启动时顺手清一遍。
+    try {
+      const swept = sweepNsisLeftovers(10)
+      if (swept.dirs > 0) {
+        logInfo('app', `已清理 NSIS 临时残留 ${swept.dirs} 个，释放 ${Math.round(swept.bytes / 1024 / 1024)}MB`)
+      }
+    } catch (err) {
+      logInfo('app', `清理 NSIS 残留跳过：${(err as Error).message}`)
     }
   }
   pruneLogs()

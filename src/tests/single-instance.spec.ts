@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { acquireLaunchLock, cleanOldUnpackDirs, releaseLaunchLock } from '../main/single-instance'
+import { acquireLaunchLock, cleanOldUnpackDirs, releaseLaunchLock, sweepNsisLeftovers } from '../main/single-instance'
 
 const madeDirs: string[] = []
 
@@ -110,5 +110,51 @@ describe('清理旧版本解压目录', () => {
     const removed = cleanOldUnpackDirs('9.9.9')
     expect(removed).toContain(legacy)
     expect(fs.existsSync(legacy)).toBe(false)
+  })
+})
+describe('清理 NSIS 的 $PLUGINSDIR 残留（C 盘被塞满的元凶）', () => {
+  // NSIS 的临时目录形状：%TEMP%\nsXXXX.tmp，里面是 app-64.7z / nsis7z.dll / 7z-out
+  function makeNsisDir(name: string, withMarker: boolean, oldMinutes: number): string {
+    const dir = path.join(os.tmpdir(), name)
+    fs.mkdirSync(dir, { recursive: true })
+    if (withMarker) {
+      fs.writeFileSync(path.join(dir, 'nsis7z.dll'), Buffer.alloc(64))
+      fs.writeFileSync(path.join(dir, 'app-64.7z'), Buffer.alloc(1024))
+      fs.mkdirSync(path.join(dir, '7z-out'), { recursive: true })
+      fs.writeFileSync(path.join(dir, '7z-out', 'Workbench.exe'), Buffer.alloc(2048))
+    } else {
+      // 不是 NSIS 的普通临时目录
+      fs.writeFileSync(path.join(dir, 'something.dat'), Buffer.alloc(128))
+    }
+    const when = new Date(Date.now() - oldMinutes * 60_000)
+    fs.utimesSync(dir, when, when)
+    madeDirs.push(dir)
+    return dir
+  }
+
+  it('清掉真正的 NSIS 残留并统计释放量', () => {
+    const d = makeNsisDir('nsuE1FF.tmp', true, 30)
+    const r = sweepNsisLeftovers(10)
+    expect(r.dirs).toBeGreaterThanOrEqual(1)
+    expect(r.bytes).toBeGreaterThan(0)
+    expect(fs.existsSync(d)).toBe(false)
+  })
+
+  it('太新的残留不碰（可能正有别的安装程序在用）', () => {
+    const d = makeNsisDir('nsa6615.tmp', true, 1)
+    sweepNsisLeftovers(10)
+    expect(fs.existsSync(d)).toBe(true)
+  })
+
+  it('名字像但内容不是 NSIS 的目录，一律不碰', () => {
+    const d = makeNsisDir('nsfAD42.tmp', false, 60)
+    sweepNsisLeftovers(10)
+    expect(fs.existsSync(d)).toBe(true)
+  })
+
+  it('名字不符合 NSIS 形状的目录绝不碰', () => {
+    const d = makeNsisDir('Workbench-smoke-tmp', true, 60)
+    sweepNsisLeftovers(10)
+    expect(fs.existsSync(d)).toBe(true)
   })
 })

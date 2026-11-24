@@ -202,6 +202,23 @@ export interface UpdateState {
   file: string | null
 }
 
+/** 临时目录现状（portable 的解压目录就落在系统临时目录下） */
+export interface TmpDirInfo {
+  current: string
+  drive: string
+  isMoved: boolean
+  freeGB: number | null
+}
+
+export interface TmpMoveResult {
+  ok: boolean
+  from: string
+  to: string
+  files: number
+  needRestart: boolean
+  message: string
+}
+
 import type { LearnedRule, RuleKind } from './parse/rules'
 
 export interface WbBridge {
@@ -331,6 +348,11 @@ export interface WbBridge {
   updateDownload(): Promise<UpdateState>
   updateApply(): Promise<void>
   onUpdateState(cb: (s: UpdateState) => void): () => void
+
+  /** 临时目录（portable 的解压目录落在系统临时目录里，C 盘吃紧时挪走） */
+  tmpInfo(): Promise<TmpDirInfo & { suggest: string }>
+  tmpMove(target?: string): Promise<TmpMoveResult>
+  tmpSweep(): Promise<{ dirs: number; freedMB: number }>
 
   /** 诊断日志 */
   logRecent(limit?: number): Promise<LogEntry[]>

@@ -160,3 +160,99 @@ function isFileBusy(file: string): boolean {
     return true
   }
 }
+
+export interface TmpSweepResult {
+  /** 删掉几个目录 */
+  dirs: number
+  /** 释放多少字节 */
+  bytes: number
+}
+
+/**
+ * 清理 NSIS 的 $PLUGINSDIR 残留（`nsXXXX.tmp`）。
+ *
+ * 这是更隐蔽的一个坑：portable 启动器把 app-64.7z（约 286MB）先解到
+ * `%TEMP%\nsXXXX.tmp`，再拷到 `%TEMP%\Workbench-<版本>`。
+ * 正常退出时 NSIS 自己会删；但进程被强杀（任务管理器结束任务、断电、
+ * 我们自己的测试脚本 Stop-Process -Force）就删不掉，一个残留就是 ~572MB。
+ * 实测在某台机器上这样攒了 35 个、共 12.72GB，直接把 C 盘塞满。
+ *
+ * 安全边界（严进宽出）：
+ *  · 只认 `ns` + 十六进制/大写字母数字 + `.tmp` 这个 NSIS 固定形状
+ *  · 必须真的含有 NSIS 特征文件（app-*.7z / nsis7z.dll / 7z-out）才算，
+ *    否则是别的软件的临时目录，一律不碰
+ *  · 里面的 exe 被占用就跳过，绝不强删正在使用的副本
+ */
+export function sweepNsisLeftovers(ageMinutes = 10): TmpSweepResult {
+  const out: TmpSweepResult = { dirs: 0, bytes: 0 }
+  const tmp = os.tmpdir()
+  let names: string[] = []
+  try {
+    names = fs.readdirSync(tmp)
+  } catch {
+    return out
+  }
+  const now = Date.now()
+  for (const name of names) {
+    // 实测 NSIS 的 $PLUGINSDIR 名字是 ns + 5 位（如 nsuE1FF.tmp、nsa6615.tmp），
+    // 不同 NSIS 版本可能 4-6 位，放宽到 4-6 全靠内容判定兜底（见下面的 looksNsis）
+    if (!/^ns[A-Za-z0-9]{4,6}\.tmp$/.test(name)) continue
+    const full = path.join(tmp, name)
+    let st: fs.Stats
+    try {
+      st = fs.statSync(full)
+    } catch {
+      continue
+    }
+    if (!st.isDirectory()) continue
+    // 太新的不碰：可能正有别的安装程序在用
+    if (now - st.mtimeMs < ageMinutes * 60_000) continue
+    // 必须确认是 NSIS 的痕迹
+    const looksNsis =
+      fs.existsSync(path.join(full, 'nsis7z.dll')) ||
+      fs.existsSync(path.join(full, '7z-out')) ||
+      fs.readdirSync(full).some((f) => /^app-(64|32|arm64)\.7z$/.test(f))
+    if (!looksNsis) continue
+    // 有任何 exe 被占用就跳过（说明还在跑）
+    let busy = false
+    try {
+      for (const f of fs.readdirSync(full)) {
+        if (f.toLowerCase().endsWith('.exe') && isFileBusy(path.join(full, f))) {
+          busy = true
+          break
+        }
+      }
+    } catch {
+      continue
+    }
+    if (busy) continue
+    let size = 0
+    try {
+      size = (function walk(dir: string): number {
+        let sum = 0
+        for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+          const p = path.join(dir, e.name)
+          if (e.isDirectory()) sum += walk(p)
+          else {
+            try {
+              sum += fs.statSync(p).size
+            } catch {
+              /* 单个文件读不到就跳过 */
+            }
+          }
+        }
+        return sum
+      })(full)
+    } catch {
+      size = 0
+    }
+    try {
+      fs.rmSync(full, { recursive: true, force: true, maxRetries: 2, retryDelay: 200 })
+      out.dirs += 1
+      out.bytes += size
+    } catch {
+      /* 删不掉就留着，下次再来 */
+    }
+  }
+  return out
+}

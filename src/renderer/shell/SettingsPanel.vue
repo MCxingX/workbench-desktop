@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import type { AppInfo, LockState, LogEntry, LogStats, ScheduleState, UiState, UpdateState } from '@shared/types'
+import type { AppInfo, LockState, LogEntry, LogStats, ScheduleState, TmpDirInfo, UiState, UpdateState } from '@shared/types'
 import type { ShiftProfile, WeekVariant } from '@shared/schedule/model'
 import { validateProfile, variantOf, previewDays } from '@shared/schedule/resolve'
 import { addDays, mondayOf, ymd } from '@shared/schedule/time'
@@ -48,6 +48,10 @@ const stats = ref<Awaited<ReturnType<typeof window.wb.storeStats>> | null>(null)
 const backups = ref<{ name: string; path: string; size: number; at: string }[]>([])
 const migrateTo = ref('')
 const keyPwd = ref('')
+// 临时目录（portable 解压目录落在系统临时目录，C 盘吃紧时可挪走）
+const tmp = ref<(TmpDirInfo & { suggest: string }) | null>(null)
+const tmpTo = ref('')
+const tmpMsg = ref('')
 
 async function protectKey(): Promise<void> {
   try {
@@ -188,6 +192,7 @@ onMounted(async () => {
   stats.value = await window.wb.storeStats()
   backups.value = await window.wb.backupList()
   autostartOn.value = await window.wb.autostart()
+  await refreshTmp()
   const pl = await window.wb.pluginsList()
   plugins.value = pl.plugins
   pluginIssues.value = pl.issues
@@ -418,6 +423,44 @@ async function doMigrate(): Promise<void> {
     fail((e as Error).message)
   }
 }
+async function refreshTmp(): Promise<void> {
+  try {
+    const t = await window.wb.tmpInfo()
+    tmp.value = t
+    if (!tmpTo.value && t.suggest) tmpTo.value = t.suggest
+  } catch {
+    /* 读不到就留空，不影响其他设置项 */
+  }
+}
+
+async function doMoveTmp(): Promise<void> {
+  const target = tmpTo.value.trim() || tmp.value?.suggest || ''
+  if (!target) return fail('先填一个目标目录')
+  try {
+    const r = await window.wb.tmpMove(target)
+    tmpMsg.value = r.message
+    if (r.ok) {
+      flash(r.needRestart ? '已改好，重启应用生效' : '已改好')
+      await refreshTmp()
+    } else {
+      fail(r.message)
+    }
+  } catch (e) {
+    fail((e as Error).message)
+  }
+}
+
+async function doSweepTmp(): Promise<void> {
+  try {
+    const r = await window.wb.tmpSweep()
+    tmpMsg.value = r.dirs > 0 ? `清掉 ${r.dirs} 个残留，释放约 ${r.freedMB} MB` : '没有可清的残留'
+    flash(tmpMsg.value)
+    await refreshTmp()
+  } catch (e) {
+    fail((e as Error).message)
+  }
+}
+
 async function toggleAutostart(): Promise<void> {
   autostartOn.value = await window.wb.setAutostart(!autostartOn.value)
   flash(autostartOn.value ? '已设为开机自启' : '已取消开机自启')
@@ -693,6 +736,26 @@ const maskOf = (v: WeekVariant | null): boolean[] => (v ? v.mask : [])
 
         <!-- 数据与备份 -->
         <template v-else-if="tab === 'data'">
+          <h3>临时目录（C 盘空间）</h3>
+          <div class="row">
+            <code class="code">{{ tmp?.current || '读取中…' }}</code>
+            <span v-if="tmp" class="badge" :class="tmp.drive.toLowerCase() === 'c:' ? 'warn' : 'ok'">
+              {{ tmp.drive }} 盘
+              <template v-if="tmp.freeGB !== null"> · 剩 {{ tmp.freeGB }} GB</template>
+            </span>
+          </div>
+          <div class="row">
+            <input v-model="tmpTo" :placeholder="tmp?.suggest || 'D:\\WorkbenchTemp'" class="wide" />
+            <button class="mini" @click="doMoveTmp">挪到别的盘</button>
+            <button class="mini" @click="doSweepTmp">清残留</button>
+          </div>
+          <p class="tip">
+            portable 版每次双击，启动器会先把程序解压到系统临时目录（约 290MB，解压峰值约 570MB），
+            跑完自动删。但进程被强制结束（任务管理器结束任务、断电）就删不掉，一次留 570MB。
+            把临时目录挪到别的盘后，这套东西从此不占 C 盘，重启应用生效。
+          </p>
+          <p v-if="tmpMsg" class="tip strong">{{ tmpMsg }}</p>
+
           <h3>数据目录</h3>
           <div class="row">
             <code class="code">{{ info?.dataDir }}</code>
@@ -1119,6 +1182,21 @@ input.name {
 .badge.on {
   color: var(--accent);
   border-color: var(--accent);
+}
+
+/* 临时目录落盘位置：C 盘红、其他盘绿 —— 一眼看出要不要挪 */
+.badge.warn {
+  color: #e8a15c;
+  border-color: #e8a15c;
+}
+
+.badge.ok {
+  color: #5fbf8a;
+  border-color: #5fbf8a;
+}
+
+.tip.strong {
+  color: var(--text-primary);
 }
 
 .code {
