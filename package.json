@@ -19,7 +19,7 @@
     "smoke": "node scripts/smoke.mjs",
     "verify": "npm run typecheck && npm run test && npm run smoke",
     "dev": "node scripts/dev.mjs",
-    "dist": "npm run build && electron-builder --win portable",
+    "dist": "npm run build && electron-builder --win",
     "release:manifest": "node scripts/release.mjs",
     "icon": "python scripts/make-icon.py"
   },

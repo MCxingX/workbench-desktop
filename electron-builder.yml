@@ -2,6 +2,9 @@ appId: com.yg.workbench
 productName: Workbench
 copyright: Copyright © 2026 YG
 
+# zip 免解压版的名字带上版本号，收到新版不会跟旧的混在一起
+artifactName: Workbench-${version}-绿色版.${ext}
+
 directories:
   output: release
   buildResources: build
@@ -40,8 +43,20 @@ removePackageScripts: true
 
 win:
   target:
-    # portable：单个 exe，双击即用，但每次启动都要把包解压到 %TEMP%（约 9-12 秒、单核满载一次）
-    # dir：免解压版（文件夹形式），启动 4-5 秒，适合固定在自己电脑上长期用
+    # ── 推荐发这个 ──
+    # zip：解压一次，之后双击 Workbench.exe 秒开（4-5 秒），连点几下也不会坏。
+    # 实测对比（各连点 3 次、间隔 2-3 秒）：
+    #   免解压版 → 主进程 1 个、4 进程共 387MB            正常
+    #   portable → 主进程 0 个、3 个孤儿启动器、1.5GB 残留  崩了
+    - target: zip
+      arch:
+        - x64
+    # portable：单个 exe、双击即用，适合临时发给别人试一下。
+    # 代价：每次启动都要完整解压一遍，而且 electron-builder 的 NSIS 模板里
+    # 第 38 行是 `RMDir /r $INSTDIR`（先删再解压），没有"已解压就跳过"的机制 ——
+    # 所以连点两下会让两个启动器同时删+解压同一个目录，文件互相覆盖，
+    # 解出来的 app.asar 是残缺的，程序起不来还留一堆空转的启动器。
+    # 这个在我们代码之外，应用层修不了，只能靠"推荐用 zip 版"绕开。
     - target: portable
       arch:
         - x64
